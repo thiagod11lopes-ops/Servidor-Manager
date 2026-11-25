@@ -6,6 +6,11 @@ Gerenciador genérico de sistemas no Windows (Electron + Vite + local-service).
 
 https://github.com/thiagod11lopes-ops/Servidor-Manager
 
+## Acesso pela internet (GitHub Pages)
+
+https://thiagod11lopes-ops.github.io/Servidor-Manager/
+
+
 ## Desenvolvimento
 
 ```bash
@@ -22,3 +27,4 @@ npm run refresh:installed
 
 Pacote offline do servidor AcompOPMS (Dashboard verde):  
 https://github.com/thiagod11lopes-ops/AcompOPMS-Servidor
+
