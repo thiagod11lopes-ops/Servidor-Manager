@@ -1,0 +1,607 @@
+import type {
+  AppData,
+  Pedido,
+  PedidoComDetalhes,
+  PedidoPlanilhaEnvioState,
+  User,
+  UserRole,
+  WorkflowEtapa,
+} from '@/types'
+import { getResponsavelParaEtapa } from '@/utils/workflow'
+import {
+  formatMensagemPrazoCorrecao,
+  marcarPrazoCorrecaoNotificationsLidas,
+  resolvePrazoCorrecaoDias,
+  resolveStatusPrazoCorrecao,
+} from '@/utils/prazoCorrecao'
+
+export type DestinoDevolucaoId = 'clinica' | 'medicamento' | string
+export type OrigemPlanilha = 'clinica' | 'medicamento'
+
+export interface DestinoDevolucaoPlanilha {
+  id: DestinoDevolucaoId
+  label: string
+  detalhe: string
+  etapaChave: string
+  perfilNotificar: UserRole
+  notificaOrigem: boolean
+}
+
+const SETORES_CAMINHO_CLINICA = [
+  'DIV_MAT_AUDITORIA',
+  'DIV_MAT_CONFECCAO_SOLEMP',
+  'DIV_MAT_CONTABILIDADE_IMH',
+  'DIV_MAT_FINANCAS',
+  'DIV_MAT_EMPENHADO',
+] as const
+
+const SETORES_CAMINHO_MEDICAMENTO = [
+  'DIV_MAT_AUDITORIA',
+  'DIV_MAT_CONTABILIDADE_IMH',
+] as const
+
+function historicoDaEtapa(
+  pedido: Pick<PedidoComDetalhes, 'etapasHistorico'>,
+  etapas: WorkflowEtapa[],
+  chave: string,
+) {
+  const etapa = etapas.find((item) => item.chave === chave)
+  if (!etapa) return null
+  return (
+    pedido.etapasHistorico.find(
+      (h) => h.etapaId === etapa.id || h.etapaNome === etapa.nome,
+    ) ?? null
+  )
+}
+
+export function origemProducaoPlanilha(
+  pedido: PedidoComDetalhes,
+  planilha: PedidoPlanilhaEnvioState | null,
+): OrigemPlanilha {
+  if (planilha?.formato === 'imhMedicamento') return 'medicamento'
+  if (pedido.clinica.tipo === 'medicamento') return 'medicamento'
+  return 'clinica'
+}
+
+function setorVisitado(
+  pedido: PedidoComDetalhes,
+  etapas: WorkflowEtapa[],
+  planilha: PedidoPlanilhaEnvioState | null,
+  chave: string,
+): boolean {
+  const hist = historicoDaEtapa(pedido, etapas, chave)
+  if (hist?.dataInicio) return true
+  if (chave === 'DIV_MAT_AUDITORIA') {
+    return Boolean(
+      planilha?.recebidaEm &&
+        !historicoDaEtapa(pedido, etapas, 'DIV_MAT_CONFECCAO_SOLEMP')?.dataInicio,
+    )
+  }
+  if (chave === 'DIV_MAT_CONTABILIDADE_IMH') {
+    return Boolean(planilha?.encaminhadaImhEm || planilha?.recebidaImhEm)
+  }
+  if (chave === 'DIV_MAT_CONFECCAO_SOLEMP') {
+    return Boolean(
+      planilha?.recebidaConfeccaoEm &&
+        historicoDaEtapa(pedido, etapas, 'DIV_MAT_CONFECCAO_SOLEMP'),
+    )
+  }
+  if (chave === 'DIV_MAT_FINANCAS') {
+    return Boolean(
+      planilha?.recebidaRascunhoEm ||
+        historicoDaEtapa(pedido, etapas, 'DIV_MAT_FINANCAS')?.dataInicio,
+    )
+  }
+  if (chave === 'DIV_MAT_EMPENHADO') {
+    return Boolean(
+      planilha?.recebidaEmpenhadoEm ||
+        historicoDaEtapa(pedido, etapas, 'DIV_MAT_EMPENHADO')?.dataInicio,
+    )
+  }
+  return false
+}
+
+/** Destinos do caminho real da planilha: só quem produziu/enviou e os setores que a receberam. */
+export function listarDestinosDevolucaoPlanilha(
+  pedido: PedidoComDetalhes,
+  etapas: WorkflowEtapa[],
+  planilha: PedidoPlanilhaEnvioState | null,
+  setorAtualChave: string,
+): DestinoDevolucaoPlanilha[] {
+  const origem = origemProducaoPlanilha(pedido, planilha)
+  const destinos: DestinoDevolucaoPlanilha[] = []
+
+  if (origem === 'medicamento') {
+    destinos.push({
+      id: 'medicamento',
+      label: 'Medicamento',
+      detalhe: 'Devolve ao medicamento que produziu e enviou a planilha. O setor será notificado.',
+      etapaChave: 'SOLICITACAO',
+      perfilNotificar: 'MEDICAMENTO',
+      notificaOrigem: true,
+    })
+  } else {
+    destinos.push({
+      id: 'clinica',
+      label: 'Clínica',
+      detalhe: 'Devolve à clínica que produziu e enviou a planilha. O setor será notificado.',
+      etapaChave: 'SOLICITACAO',
+      perfilNotificar: 'CLINICA',
+      notificaOrigem: true,
+    })
+  }
+
+  const setoresCaminho =
+    origem === 'medicamento' ? SETORES_CAMINHO_MEDICAMENTO : SETORES_CAMINHO_CLINICA
+
+  for (const chave of setoresCaminho) {
+    if (chave === setorAtualChave) continue
+    if (!setorVisitado(pedido, etapas, planilha, chave)) continue
+    const etapa = etapas.find((item) => item.chave === chave)
+    if (!etapa) continue
+    destinos.push({
+      id: chave,
+      label: etapa.nome,
+      detalhe: `Retorna a planilha para ${etapa.nome}.`,
+      etapaChave: chave,
+      perfilNotificar: etapa.perfilResponsavel,
+      notificaOrigem: false,
+    })
+  }
+
+  return destinos
+}
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+function uniqueStrings(values: string[] | undefined): string[] {
+  return [...new Set((values ?? []).filter((id) => typeof id === 'string' && id.length > 0))]
+}
+
+function rowIdsDoPedido(data: AppData, pedido: Pedido): string[] {
+  if (pedido.consumoRowIds?.length) return [...pedido.consumoRowIds]
+  const planilha = data.pedidoPlanilhaEnvio?.[pedido.id]
+  const fromMed = uniqueStrings(planilha?.imhMedicamentoLinhas?.map((linha) => linha.id))
+  if (fromMed.length) return fromMed
+  const fromImhAba = uniqueStrings(planilha?.imhAbaLinhas?.map((linha) => linha.id))
+  if (fromImhAba.length) return fromImhAba
+  const fromDiv = uniqueStrings(planilha?.divMaterialLinhas?.map((linha) => linha.id))
+  if (fromDiv.length) return fromDiv
+  return uniqueStrings(
+    planilha?.linhas?.map((linha) => linha.pacienteGrupoId || linha.id).filter(Boolean) as string[],
+  )
+}
+
+function moverIdsParaDevolvidos(
+  finalized: string[] | undefined,
+  devolvidos: string[] | undefined,
+  ids: Set<string>,
+): { finalized: string[]; devolvidos: string[] } {
+  const nextFinalized: string[] = []
+  const nextDevolvidos = new Set(uniqueStrings(devolvidos))
+  for (const id of uniqueStrings(finalized)) {
+    if (ids.has(id)) nextDevolvidos.add(id)
+    else nextFinalized.push(id)
+  }
+  return { finalized: nextFinalized, devolvidos: [...nextDevolvidos] }
+}
+
+/** Desmarca linhas enviadas e as pinta de laranja para reenvio (clínica/medicamento). */
+function desmarcarCheckboxesOrigem(data: AppData, pedido: Pedido): void {
+  const ids = new Set(rowIdsDoPedido(data, pedido))
+  if (ids.size === 0) return
+
+  if (!data.consumoPlanilha) data.consumoPlanilha = {}
+  const consumo = data.consumoPlanilha[pedido.clinicaId]
+  if (consumo) {
+    const auditoria = moverIdsParaDevolvidos(
+      consumo.finalizedAuditoriaRowIds ?? consumo.finalizedRowIds,
+      consumo.devolvidosAuditoriaRowIds,
+      ids,
+    )
+    const material = moverIdsParaDevolvidos(
+      consumo.finalizedMaterialRowIds,
+      consumo.devolvidosMaterialRowIds,
+      ids,
+    )
+    data.consumoPlanilha[pedido.clinicaId] = {
+      ...consumo,
+      finalizedRowIds: auditoria.finalized,
+      finalizedAuditoriaRowIds: auditoria.finalized,
+      finalizedMaterialRowIds: material.finalized,
+      devolvidosAuditoriaRowIds: auditoria.devolvidos,
+      devolvidosMaterialRowIds: material.devolvidos,
+    }
+  }
+
+  if (!data.planilhasLivres) data.planilhasLivres = {}
+  const livres = data.planilhasLivres[pedido.clinicaId]
+  if (livres) {
+    let nextLivres = { ...livres }
+
+    if (livres.imhMedicamento) {
+      const imhMed = moverIdsParaDevolvidos(
+        livres.imhMedicamento.finalizedImhIds,
+        livres.imhMedicamento.devolvidosImhIds,
+        ids,
+      )
+      nextLivres = {
+        ...nextLivres,
+        imhMedicamento: {
+          ...livres.imhMedicamento,
+          finalizedImhIds: imhMed.finalized,
+          devolvidosImhIds: imhMed.devolvidos,
+        },
+      }
+    }
+
+    if (livres.imh) {
+      const imh = moverIdsParaDevolvidos(
+        livres.imh.finalizedImhIds,
+        livres.imh.devolvidosImhIds,
+        ids,
+      )
+      nextLivres = {
+        ...nextLivres,
+        imh: {
+          ...livres.imh,
+          finalizedImhIds: imh.finalized,
+          devolvidosImhIds: imh.devolvidos,
+        },
+      }
+    }
+
+    const div = moverIdsParaDevolvidos(
+      livres.finalizedDivMaterialIds,
+      livres.devolvidosDivMaterialIds,
+      ids,
+    )
+    nextLivres = {
+      ...nextLivres,
+      finalizedDivMaterialIds: div.finalized,
+      devolvidosDivMaterialIds: div.devolvidos,
+    }
+
+    data.planilhasLivres[pedido.clinicaId] = nextLivres
+  }
+}
+
+export function pedidoDevolvidoParaOrigem(
+  pedido: Pick<Pedido, 'planilhaDevolvidaParaChave'>,
+): boolean {
+  return pedido.planilhaDevolvidaParaChave === 'SOLICITACAO'
+}
+
+/** Extrai a justificativa pura de uma observação de devolução (retrocompatível). */
+export function extrairJustificativaDevolucao(
+  observacao: string | null | undefined,
+): string | null {
+  if (!observacao?.trim()) return null
+  const match = observacao.match(/Justificativa:\s*(.+)$/s)
+  return match?.[1]?.trim() || observacao.trim()
+}
+
+export function resolveJustificativaDevolucaoPedido(
+  pedido: Pick<Pedido, 'planilhaDevolvidaJustificativa' | 'etapasHistorico'>,
+  _etapaChave: string,
+  etapaId?: string,
+  etapaNome?: string,
+): string | null {
+  if (pedido.planilhaDevolvidaJustificativa?.trim()) {
+    return pedido.planilhaDevolvidaJustificativa.trim()
+  }
+  const historico = pedido.etapasHistorico.find(
+    (h) =>
+      h.etapaId === etapaId ||
+      (etapaNome && h.etapaNome === etapaNome) ||
+      h.observacao?.includes('Planilha devolvida'),
+  )
+  return extrairJustificativaDevolucao(historico?.observacao)
+}
+
+/** Limpa tarja/estado atual da devolução (reenvio). Mantém `planilhaDevolucoes` (histórico). */
+export function limparEstadoDevolucaoPlanilha(data: AppData, pedidoId: string): void {
+  const index = data.pedidos.findIndex((item) => item.id === pedidoId)
+  if (index >= 0) {
+    data.pedidos[index] = {
+      ...data.pedidos[index],
+      planilhaDevolvidaParaChave: null,
+      planilhaDevolvidaEm: null,
+      planilhaDevolvidaJustificativa: null,
+    }
+  }
+  marcarPrazoCorrecaoNotificationsLidas(data, pedidoId)
+  const atual = data.pedidoPlanilhaEnvio?.[pedidoId]
+  if (!atual) return
+  data.pedidoPlanilhaEnvio![pedidoId] = {
+    ...atual,
+    devolvidaEm: undefined,
+    devolvidaParaChave: undefined,
+  }
+}
+
+function ajustarFlagsPlanilha(
+  data: AppData,
+  pedidoId: string,
+  etapaChave: string,
+): void {
+  const atual = data.pedidoPlanilhaEnvio?.[pedidoId]
+  if (!atual) return
+
+  if (etapaChave === 'SOLICITACAO') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      enviadoEm: '',
+      recebidaEm: undefined,
+      encaminhadaImhEm: undefined,
+      recebidaImhEm: undefined,
+      recebidaConfeccaoEm: undefined,
+      arquivadaEm: undefined,
+    }
+    return
+  }
+
+  if (etapaChave === 'DIV_MAT_AUDITORIA') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      recebidaEm: undefined,
+      encaminhadaImhEm: undefined,
+      recebidaImhEm: undefined,
+      arquivadaEm: undefined,
+    }
+    return
+  }
+
+  if (etapaChave === 'DIV_MAT_CONFECCAO_SOLEMP') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      recebidaConfeccaoEm: undefined,
+      recebidaRascunhoEm: undefined,
+      recebidaEmpenhadoEm: undefined,
+    }
+    return
+  }
+
+  if (etapaChave === 'DIV_MAT_FINANCAS') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      recebidaRascunhoEm: undefined,
+      recebidaEmpenhadoEm: undefined,
+    }
+    return
+  }
+
+  if (etapaChave === 'DIV_MAT_EMPENHADO') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      recebidaEmpenhadoEm: undefined,
+    }
+    return
+  }
+
+  if (etapaChave === 'DIV_MAT_CONTABILIDADE_IMH') {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...atual,
+      recebidaImhEm: undefined,
+      arquivadaEm: undefined,
+    }
+  }
+}
+
+function chavesAposDestino(destinoChave: string): string[] {
+  if (destinoChave === 'SOLICITACAO') {
+    return [
+      'DIV_MAT_AUDITORIA',
+      'DIV_MAT_CONFECCAO_SOLEMP',
+      'DIV_MAT_CONTABILIDADE_IMH',
+      'DIV_MAT_INDENIZADO',
+      'DIV_MAT_FINANCAS',
+      'DIV_MAT_EMPENHADO',
+    ]
+  }
+  if (destinoChave === 'DIV_MAT_AUDITORIA') {
+    return ['DIV_MAT_CONTABILIDADE_IMH', 'DIV_MAT_INDENIZADO']
+  }
+  if (destinoChave === 'DIV_MAT_CONTABILIDADE_IMH') {
+    return ['DIV_MAT_INDENIZADO']
+  }
+  if (destinoChave === 'DIV_MAT_CONFECCAO_SOLEMP') {
+    return ['DIV_MAT_FINANCAS', 'DIV_MAT_EMPENHADO']
+  }
+  if (destinoChave === 'DIV_MAT_FINANCAS') {
+    return ['DIV_MAT_EMPENHADO']
+  }
+  return []
+}
+
+export function devolverPlanilhaParaDestino(
+  data: AppData,
+  pedidoId: string,
+  destino: DestinoDevolucaoPlanilha,
+  usuario: User,
+  justificativa: string,
+): AppData {
+  const justificativaLimpa = justificativa.trim()
+  if (justificativaLimpa.length < 10) {
+    throw new Error('Informe a justificativa da devolução (mínimo 10 caracteres).')
+  }
+
+  const pedidoIndex = data.pedidos.findIndex((p) => p.id === pedidoId)
+  if (pedidoIndex < 0) throw new Error('Pedido não encontrado')
+
+  const pedido = { ...data.pedidos[pedidoIndex] }
+  if (pedido.concluido) throw new Error('Processo já encerrado')
+
+  const etapaDestino = data.workflowEtapas.find((e) => e.chave === destino.etapaChave)
+  if (!etapaDestino) throw new Error('Setor de destino não encontrado')
+
+  const etapaPorId = new Map(data.workflowEtapas.map((e) => [e.id, e]))
+  const chavesDescartar = new Set(chavesAposDestino(destino.etapaChave))
+
+  const historico = pedido.etapasHistorico.map((h) => ({ ...h }))
+  const proximoHistorico = historico.filter((h) => {
+    const chave = etapaPorId.get(h.etapaId)?.chave
+    if (chave && chavesDescartar.has(chave)) return false
+    return true
+  })
+
+  const observacao = `Planilha devolvida por ${usuario.nome} para ${destino.label}. Justificativa: ${justificativaLimpa}`
+
+  const alvo = proximoHistorico.find(
+    (h) =>
+      h.etapaId === etapaDestino.id ||
+      h.etapaNome === etapaDestino.nome ||
+      etapaPorId.get(h.etapaId)?.chave === destino.etapaChave,
+  )
+  if (alvo) {
+    alvo.dataConclusao = null
+    alvo.observacao = observacao
+  } else {
+    const responsavelNovo = getResponsavelParaEtapa(etapaDestino, data.usuarios, pedido.clinicaId)
+    proximoHistorico.push({
+      etapaId: etapaDestino.id,
+      etapaNome: etapaDestino.nome,
+      responsavelId: responsavelNovo?.id ?? usuario.id,
+      responsavelNome: responsavelNovo?.nome ?? usuario.nome,
+      dataInicio: nowIso(),
+      dataConclusao: null,
+      observacao,
+      arquivos: [],
+    })
+  }
+
+  const responsavel = getResponsavelParaEtapa(etapaDestino, data.usuarios, pedido.clinicaId)
+  const ativas = (pedido.etapasAtivasIds?.length ? pedido.etapasAtivasIds : [pedido.etapaAtualId]).filter(
+    (id) => {
+      const chave = etapaPorId.get(id)?.chave
+      if (!chave) return false
+      if (chavesDescartar.has(chave)) return false
+      if (id === pedido.etapaAtualId) return false
+      return true
+    },
+  )
+  if (!ativas.includes(etapaDestino.id)) ativas.unshift(etapaDestino.id)
+
+  const etapaAtual =
+    data.workflowEtapas.find((e) => e.id === pedido.etapaAtualId) ??
+    data.workflowEtapas.find((e) => e.id === (pedido.etapasAtivasIds?.[0] ?? ''))
+  const clinicaNome =
+    data.clinicas.find((c) => c.id === pedido.clinicaId)?.nome ?? destino.label
+  const reversaoId = `rev-planilha-${Date.now()}`
+  const devolucaoEm = nowIso()
+  const devolucaoRegistro = {
+    id: `dev-planilha-${Date.now()}`,
+    em: devolucaoEm,
+    deEtapaChave: etapaAtual?.chave ?? null,
+    deEtapaNome: etapaAtual?.nome ?? 'Setor atual',
+    paraEtapaChave: destino.etapaChave,
+    paraEtapaNome: destino.label,
+    porUsuarioId: usuario.id,
+    porUsuarioNome: usuario.nome,
+    justificativa: justificativaLimpa,
+  }
+
+  data.pedidos[pedidoIndex] = {
+    ...pedido,
+    etapaAtualId: etapaDestino.id,
+    etapasAtivasIds: ativas,
+    responsavelAtualId: responsavel?.id ?? usuario.id,
+    concluido: false,
+    etapasHistorico: proximoHistorico,
+    dataEntrega: destino.etapaChave === 'SOLICITACAO' ? null : pedido.dataEntrega,
+    planilhaDevolvidaParaChave: destino.etapaChave,
+    planilhaDevolvidaEm: devolucaoEm,
+    planilhaDevolvidaJustificativa: justificativaLimpa,
+    planilhaDevolucoes: [...(pedido.planilhaDevolucoes ?? []), devolucaoRegistro],
+  }
+
+  if (data.processosArquivados) {
+    data.processosArquivados = data.processosArquivados.filter((item) => {
+      if (item.pedidoId !== pedidoId) return true
+      return !chavesDescartar.has(item.etapaChave) && item.etapaChave !== destino.etapaChave
+    })
+  }
+
+  ajustarFlagsPlanilha(data, pedidoId, destino.etapaChave)
+
+  const planilhaAtual = data.pedidoPlanilhaEnvio?.[pedidoId]
+  if (planilhaAtual) {
+    data.pedidoPlanilhaEnvio![pedidoId] = {
+      ...planilhaAtual,
+      devolvidaEm: devolucaoEm,
+      devolvidaParaChave: destino.etapaChave,
+    }
+  }
+
+  if (destino.etapaChave === 'SOLICITACAO') {
+    desmarcarCheckboxesOrigem(data, {
+      ...data.pedidos[pedidoIndex],
+    })
+  }
+
+  if (!data.reversoes) data.reversoes = []
+  data.reversoes.push({
+    id: reversaoId,
+    pedidoId,
+    pedidoNumero: pedido.numero,
+    clinicaNome,
+    etapaDeNome: etapaAtual?.nome ?? 'Setor atual',
+    etapaParaNome: destino.label,
+    motivo: justificativaLimpa,
+    usuarioId: usuario.id,
+    usuarioNome: usuario.nome,
+    data: devolucaoEm,
+    status: 'PENDENTE',
+    respostaGestor: null,
+    dataResposta: null,
+    gestorNome: null,
+  })
+
+  data.historico.push({
+    id: `hist-devolver-${Date.now()}`,
+    pedidoId,
+    etapaId: etapaDestino.id,
+    etapaNome: etapaDestino.nome,
+    usuarioId: usuario.id,
+    usuarioNome: usuario.nome,
+    data: devolucaoEm,
+    observacao,
+  })
+
+  const pedidoAposDevolucao = data.pedidos[pedidoIndex]
+  const statusPrazo = resolveStatusPrazoCorrecao(data, pedidoAposDevolucao, devolucaoEm)
+  const prazoDiasFallback = resolvePrazoCorrecaoDias(etapaAtual)
+  const mensagemPrazo = statusPrazo
+    ? formatMensagemPrazoCorrecao(statusPrazo)
+    : `Prazo de correção: ${prazoDiasFallback} dia(s).`
+
+  data.notificacoes.push({
+    id: `notif-devolver-${pedidoId}-${destino.id}-${Date.now()}`,
+    tipo: 'PLANILHA_DEVOLVIDA',
+    titulo: `Planilha devolvida — ${pedido.numero}`,
+    mensagem: `${usuario.nome} devolveu a planilha para ${destino.label}. Justificativa: ${justificativaLimpa}. ${mensagemPrazo}`,
+    pedidoId,
+    reversaoId,
+    perfilDestino: destino.perfilNotificar,
+    etapaChave: destino.etapaChave,
+    lida: false,
+    data: nowIso(),
+  })
+
+  data.notificacoes.push({
+    id: `notif-devolver-gestor-${pedidoId}-${Date.now()}`,
+    tipo: 'REVERSAO_TIMELINE',
+    titulo: `Devolução de planilha — ${pedido.numero}`,
+    mensagem: `${usuario.nome} devolveu a planilha para ${destino.label}. ${justificativaLimpa}. ${mensagemPrazo}`,
+    pedidoId,
+    reversaoId,
+    perfilDestino: null,
+    etapaChave: destino.etapaChave,
+    lida: false,
+    data: nowIso(),
+  })
+
+  return data
+}

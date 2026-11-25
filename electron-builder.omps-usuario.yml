@@ -1,0 +1,50 @@
+# OMPS Usuário — cliente desktop Electron (rede fixa 192.168.1.100:8080/login).
+# Independente do hub e do wizard portable AcompOPMS-Instalador (dev/legado).
+appId: com.servidor.omps.usuario
+productName: OMPS Usuário
+copyright: Copyright © Servidor Manager / OMPS
+
+directories:
+  app: AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/cliente
+  output: release/omps-usuario
+  buildResources: desktop
+
+extraMetadata:
+  description: OMPS Usuário — cliente desktop AcompOPMS (servidor central LAN)
+
+files:
+  - "**/*"
+  - "!**/*.md"
+
+extraResources:
+  - from: resources-packaging/servidor-omps-product.json
+    to: servidor-omps-product.json
+  - from: scripts/PostInstall-OmpsUsuario.ps1
+    to: omps-usuario-bootstrap/PostInstall-OmpsUsuario.ps1
+  - from: scripts/Create-DesktopShortcut-OmpsUsuario.ps1
+    to: omps-usuario-bootstrap/Create-DesktopShortcut-OmpsUsuario.ps1
+  - from: scripts/Resolve-OmpsUserDesktopDirectory.ps1
+    to: omps-usuario-bootstrap/Resolve-OmpsUserDesktopDirectory.ps1
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  executableName: AcompOPMS
+  # signAndEditExecutable: true exige extrair winCodeSign (symlinks) — ver docs/WINDOWS-CODE-SIGNING.md.
+  # Authenticode do binário instalado: npm run sign:omps-release após --dir (com CSC_*).
+  signAndEditExecutable: false
+
+nsis:
+  artifactName: OMPS Usuario.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  include: desktop/installer-omps-usuario.nsh
+  uninstallDisplayName: OMPS Usuário
+  shortcutName: OMPS Usuário
+
+npmRebuild: false

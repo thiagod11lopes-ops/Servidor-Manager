@@ -1,0 +1,14 @@
+{
+  "name": "omps-hub",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Hub OMPS.exe — escolha Servidor ou Cliente",
+  "main": "electron-main.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^35.7.5"
+  }
+}

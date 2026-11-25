@@ -1,0 +1,11 @@
+{
+  "schema": "omps-payload-source-lock/1",
+  "sourceRelativePath": "AcompSolemp-cursor-servidor-lan-etapa16-bcc8",
+  "sourceProvenance": "vendored-workspace-copy",
+  "gitSha": null,
+  "gitShaRequired": false,
+  "contentSha256": "2e82538447fbedb1a5125a2a7aa821aa85a4e2bc87760b180e7533abdec9b314",
+  "pinNote": "Revisão Git indisponível (sem .git). Pin por contentSha256. Release com clone: OMPS_PAYLOAD_SOURCE + gitSha no lock (--write-lock).",
+  "ompsVersion": "0.0.0",
+  "updatedAt": "2026-10-18T01:13:38.739Z"
+}

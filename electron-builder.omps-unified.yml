@@ -1,0 +1,47 @@
+# Hub OMPS.exe — escolha Servidor OMPS ou Cliente AcompOPMS (subinstaladores em resources/subinstallers).
+# Não altera servidor.exe genérico (package.json build).
+appId: com.servidor.omps.unified
+productName: OMPS
+copyright: Copyright © Servidor Manager / OMPS
+
+directories:
+  output: release/omps-hub
+  # NSIS dedicado (sem desktop/installer.nsh genérico do Manager).
+  buildResources: desktop/omps-unified-nsis
+
+extraMetadata:
+  main: omps-hub/electron-main.mjs
+  description: OMPS — instalador unificado (Servidor ou Cliente)
+
+files:
+  - omps-hub/**/*
+  - scripts/omps-unified-product-spec.mjs
+  - package.json
+
+extraResources:
+  - from: release/omps-unified-bundle/subinstallers
+    to: subinstallers
+    filter:
+      - "**/*"
+  - from: release/omps-unified-bundle/omps-unified-manifest.json
+    to: omps-unified-manifest.json
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  executableName: OMPS
+  signAndEditExecutable: false
+
+nsis:
+  # Nome distinto do OMPS.exe instalado — instalador e app com o mesmo nome quebram CopyFiles/7z no NSIS (Windows).
+  artifactName: Instalar OMPS.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  uninstallDisplayName: OMPS (hub)
+  shortcutName: OMPS

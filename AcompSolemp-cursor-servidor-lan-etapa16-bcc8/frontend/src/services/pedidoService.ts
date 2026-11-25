@@ -1,0 +1,697 @@
+import type {
+  AppData,
+  AguardandoEmpenhoItem,
+  DashboardCorrecaoVencidaItem,
+  DashboardEmpenhadoItem,
+  DashboardMetrics,
+  DashboardPedidoItem,
+  EmpenhadoMesTotal,
+  PedidoComDetalhes,
+  PedidoFilters,
+  WorkflowEtapa,
+} from '@/types'
+import { enrichPedido } from '@/utils/workflow'
+import {
+  delay,
+  loadFreshAppData,
+  peekDemoAppData,
+  saveAppData,
+  saveDemoAppData,
+} from '@/mocks/seed'
+import { useCloudAppDataSync } from '@/config/dataSource'
+import { flushSupabaseAppDataSync } from '@/data/persistence/supabaseSync'
+import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns'
+import { ptBR } from 'date-fns/locale'
+import { removePedidosFromAppData } from '@/utils/pedidoCleanup'
+import {
+  contarPessoasAtendidas,
+  contarProcedimentosDivMaterial,
+} from '@/utils/dashboardAtendimentos'
+import {
+  coletarLinhasTotalIndenizado,
+  separarLinhasIndenizadoPorStatus,
+  serieMensalIndenizadoPorOrigem,
+  somarPctIndenizarDoPedido,
+  somarValoresPorOrigem,
+} from '@/utils/totalIndenizado'
+import { etapaVisivelNaTimeline } from '@/utils/timelineFlow'
+import { canAccessGestorRoute } from '@/utils/permissions'
+import { authService } from '@/services/authService'
+import { pedidoEtapaConcluidaParaChave, pedidoPendenteParaChave } from '@/utils/perfilEtapa'
+import { resolveEmpenhoExibicao } from '@/utils/empenho'
+import { parseValorBrasileiro } from '@/utils/consumoMaterialOds'
+import {
+  resolveCorretorPerfil,
+  resolveStatusPrazoCorrecao,
+  syncPrazoCorrecaoNotifications,
+} from '@/utils/prazoCorrecao'
+
+function resolveSetorOrigem(pedido: PedidoComDetalhes): Pick<
+  AguardandoEmpenhoItem,
+  'setorTipo' | 'setorLabel' | 'setorNome'
+> {
+  const tipo = pedido.clinica.tipo ?? 'clinica'
+  if (tipo === 'medicamento') {
+    return { setorTipo: 'medicamento', setorLabel: 'Farmácia', setorNome: pedido.clinica.nome }
+  }
+  if (tipo === 'empenhado') {
+    return { setorTipo: 'empenhado', setorLabel: 'Empenhado', setorNome: pedido.clinica.nome }
+  }
+  return { setorTipo: 'clinica', setorLabel: 'Clínica', setorNome: pedido.clinica.nome }
+}
+
+function resolveValorSolemp(pedido: PedidoComDetalhes): number {
+  if (typeof pedido.solemp?.valor === 'number' && Number.isFinite(pedido.solemp.valor)) {
+    return pedido.solemp.valor
+  }
+  return pedido.valor
+}
+
+/** Soma dos Valores Totais da planilha Div. de Material anexada ao PED. */
+function somarValorTotalDivMaterial(
+  pedidoId: string,
+  planilhaEnvio: AppData['pedidoPlanilhaEnvio'],
+): number {
+  const linhas = planilhaEnvio?.[pedidoId]?.divMaterialLinhas ?? []
+  let total = 0
+  for (const linha of linhas) {
+    total += parseValorBrasileiro(linha.valorTotal ?? '')
+  }
+  return total
+}
+
+/**
+ * Valor dos cards de empenho do dashboard:
+ * prioriza Valor Total da Div. de Material; senão usa SOLEMP/pedido.
+ */
+function resolveValorEmpenhoDashboard(
+  pedido: PedidoComDetalhes,
+  planilhaEnvio: AppData['pedidoPlanilhaEnvio'],
+): number {
+  const fromDiv = somarValorTotalDivMaterial(pedido.id, planilhaEnvio)
+  if (fromDiv > 0) return fromDiv
+  return resolveValorSolemp(pedido)
+}
+
+function dataConclusaoPedido(pedido: PedidoComDetalhes): string | null {
+  const datas = pedido.etapasHistorico
+    .map((h) => h.dataConclusao)
+    .filter((d): d is string => Boolean(d))
+  if (datas.length === 0) return null
+  return datas.reduce((max, d) => (d > max ? d : max), datas[0])
+}
+
+/** Momento em que clínica/medicamento enviou a planilha (fallback: data da solicitação). */
+function dataEnvioPlanilhaPedido(
+  pedido: PedidoComDetalhes,
+  planilhaEnvio: AppData['pedidoPlanilhaEnvio'] | undefined,
+): string {
+  const enviado = planilhaEnvio?.[pedido.id]?.enviadoEm?.trim()
+  if (enviado) return enviado
+  return pedido.dataSolicitacao
+}
+
+/**
+ * Dias de calendário do envio da planilha até a conclusão completa na timeline.
+ * Retorna null se o processo não estiver concluído ou as datas forem inválidas.
+ */
+function diasEnvioAteConclusao(
+  pedido: PedidoComDetalhes,
+  planilhaEnvio: AppData['pedidoPlanilhaEnvio'] | undefined,
+): number | null {
+  if (!pedido.concluido) return null
+  const fim = dataConclusaoPedido(pedido)
+  if (!fim) return null
+  const inicio = dataEnvioPlanilhaPedido(pedido, planilhaEnvio)
+  const dias = differenceInCalendarDays(parseISO(fim), parseISO(inicio))
+  if (!Number.isFinite(dias) || dias < 0) return null
+  return dias
+}
+
+function getEtapasAtivasPedido(
+  pedido: PedidoComDetalhes,
+  etapas: WorkflowEtapa[],
+): WorkflowEtapa[] {
+  const ids =
+    (pedido.etapasAtivasIds?.length ?? 0) > 0
+      ? pedido.etapasAtivasIds!
+      : pedido.etapaAtualId
+        ? [pedido.etapaAtualId]
+        : [pedido.etapaAtual.id]
+
+  const ativas = etapas
+    .filter((e) => ids.includes(e.id) && etapaVisivelNaTimeline(e))
+    .sort((a, b) => a.ordem - b.ordem)
+
+  if (ativas.length > 0) return ativas
+  return pedido.etapaAtual ? [pedido.etapaAtual] : []
+}
+
+function toDashboardPedidoItem(
+  pedido: PedidoComDetalhes,
+  etapas?: WorkflowEtapa[],
+  planilhaEnvio?: AppData['pedidoPlanilhaEnvio'],
+): DashboardPedidoItem {
+  const setor = resolveSetorOrigem(pedido)
+  const diasAteConclusao = diasEnvioAteConclusao(pedido, planilhaEnvio) ?? undefined
+
+  const ativas = etapas ? getEtapasAtivasPedido(pedido, etapas) : [pedido.etapaAtual]
+  const etapasAtivasNomes = ativas.map((e) => e.nome).join(' · ')
+
+  return {
+    pedidoId: pedido.id,
+    pedidoNumero: pedido.numero,
+    clinicaNome: pedido.clinica.nome,
+    empresaNome: pedido.empresa.nomeFantasia,
+    materialDescricao: pedido.material.descricao,
+    etapaAtual: etapasAtivasNomes || pedido.etapaAtual.nome,
+    valor: pedido.valor,
+    solempNumero: pedido.solemp?.numero ?? null,
+    prazoStatus: pedido.prazoStatus,
+    diasNaEtapa: pedido.diasNaEtapa,
+    diasRestantes: pedido.diasRestantes,
+    dataSolicitacao: pedido.dataSolicitacao,
+    concluido: pedido.concluido,
+    etapasAtivasNomes,
+    ...setor,
+    ...(diasAteConclusao !== undefined ? { diasAteConclusao } : {}),
+  }
+}
+
+/** Ativo só em Aguardando NE (após Confecção concluída; ainda não Empenhado). */
+function isAguardandoEmpenhoNaSolempConfeccionada(
+  pedido: PedidoComDetalhes,
+  etapas: WorkflowEtapa[],
+): boolean {
+  if (pedido.concluido || !pedido.solemp?.numero) return false
+
+  // Não contar se ainda estiver em Confecção (antes de Aguardando NE)
+  if (pedidoPendenteParaChave(pedido, etapas, 'DIV_MAT_CONFECCAO_SOLEMP')) return false
+  if (!pedidoEtapaConcluidaParaChave(pedido, etapas, 'DIV_MAT_CONFECCAO_SOLEMP')) return false
+
+  // Já passou pelo Empenhado — não está mais aguardando
+  if (pedidoEtapaConcluidaParaChave(pedido, etapas, 'DIV_MAT_EMPENHADO')) return false
+  if (pedidoPendenteParaChave(pedido, etapas, 'DIV_MAT_EMPENHADO')) return false
+
+  return pedidoPendenteParaChave(pedido, etapas, 'DIV_MAT_FINANCAS')
+}
+
+function dataEmpenhadoDoPedido(
+  pedido: PedidoComDetalhes,
+  etapas: WorkflowEtapa[],
+): string | null {
+  const etapa = etapas.find((e) => e.chave === 'DIV_MAT_EMPENHADO')
+  if (!etapa) return null
+  const historico = pedido.etapasHistorico.find(
+    (h) =>
+      Boolean(h.dataConclusao) &&
+      (h.etapaId === etapa.id || h.etapaNome === etapa.nome || h.etapaNome === 'Empenhado'),
+  )
+  return historico?.dataConclusao ?? null
+}
+
+function getContext(data: AppData) {
+  return {
+    clinicas: data.clinicas,
+    empresas: data.empresas,
+    materiais: data.materiais,
+    etapas: data.workflowEtapas,
+    usuarios: data.usuarios,
+    solemp: data.solemp,
+    notasFiscais: data.notasFiscais,
+  }
+}
+
+function enrichAll(data: AppData): PedidoComDetalhes[] {
+  const context = getContext(data)
+  return data.pedidos
+    .map((p) => enrichPedido(p, context))
+    .filter((p): p is PedidoComDetalhes => p !== null)
+}
+
+function assertGestorPodeExcluir(usuarioId: string, data: AppData): void {
+  const gestor = authService.getGestorUser()
+  if (gestor?.id === usuarioId && canAccessGestorRoute(gestor.perfil)) {
+    return
+  }
+
+  const usuario = data.usuarios.find((u) => u.id === usuarioId && u.ativo)
+  if (usuario && canAccessGestorRoute(usuario.perfil)) {
+    return
+  }
+
+  throw new Error('Apenas o gestor pode excluir timelines.')
+}
+
+function filterPedidos(pedidos: PedidoComDetalhes[], filters?: PedidoFilters) {
+  if (!filters) return pedidos
+
+  return pedidos.filter((p) => {
+    if (filters.clinicaId && p.clinicaId !== filters.clinicaId) return false
+    if (filters.empresaId && p.empresaId !== filters.empresaId) return false
+    if (filters.responsavelId && p.responsavelAtualId !== filters.responsavelId) return false
+    if (filters.etapaId && p.etapaAtualId !== filters.etapaId) return false
+    if (filters.materialId && p.materialId !== filters.materialId) return false
+    if (filters.status === 'CONCLUIDO' && !p.concluido) return false
+    if (filters.status === 'EM_ANDAMENTO' && p.concluido) return false
+    if (
+      filters.status &&
+      ['NO_PRAZO', 'PROXIMO_VENCIMENTO', 'ATRASADO'].includes(filters.status) &&
+      p.prazoStatus !== filters.status
+    ) {
+      return false
+    }
+    if (filters.valorMin !== undefined && p.valor < filters.valorMin) return false
+    if (filters.valorMax !== undefined && p.valor > filters.valorMax) return false
+    if (filters.dataInicio && parseISO(p.dataSolicitacao) < parseISO(filters.dataInicio)) return false
+    if (filters.dataFim && parseISO(p.dataSolicitacao) > parseISO(filters.dataFim)) return false
+    if (filters.busca) {
+      const term = filters.busca.toLowerCase()
+      const match =
+        p.numero.toLowerCase().includes(term) ||
+        p.clinica.nome.toLowerCase().includes(term) ||
+        p.empresa.nomeFantasia.toLowerCase().includes(term) ||
+        p.material.descricao.toLowerCase().includes(term) ||
+        Boolean(p.solemp?.numero?.toLowerCase().includes(term)) ||
+        Boolean(p.notaFiscal?.numero?.toLowerCase().includes(term))
+      if (!match) return false
+    }
+    return true
+  })
+}
+
+export const pedidoService = {
+  async list(filters?: PedidoFilters, clinicaId?: string | null): Promise<PedidoComDetalhes[]> {
+    // Sem delay artificial: listagens do gestor precisam ser responsivas.
+    const data = await loadFreshAppData()
+    let pedidos = enrichAll(data)
+
+    if (clinicaId) {
+      pedidos = pedidos.filter((p) => p.clinicaId === clinicaId)
+    }
+
+    return filterPedidos(pedidos, filters)
+  },
+
+  async getById(id: string): Promise<PedidoComDetalhes | null> {
+    const data = await loadFreshAppData()
+    const pedido = data.pedidos.find((p) => p.id === id)
+    if (!pedido) return null
+    return enrichPedido(pedido, getContext(data))
+  },
+
+  async listDemo(filters?: PedidoFilters): Promise<PedidoComDetalhes[]> {
+    const data = peekDemoAppData()
+    if (!data) return []
+    return filterPedidos(enrichAll(data), filters)
+  },
+
+  async getDemoById(id: string): Promise<PedidoComDetalhes | null> {
+    const data = peekDemoAppData()
+    if (!data) return null
+    const pedido = data.pedidos.find((p) => p.id === id)
+    if (!pedido) return null
+    return enrichPedido(pedido, getContext(data))
+  },
+
+  async getDashboardMetrics(clinicaId?: string | null): Promise<DashboardMetrics> {
+    const data = await loadFreshAppData()
+    const beforeNotif = data.notificacoes.length
+    syncPrazoCorrecaoNotifications(data)
+    if (data.notificacoes.length !== beforeNotif) {
+      saveAppData(data)
+    }
+    let pedidos = enrichAll(data)
+
+    if (clinicaId) {
+      pedidos = pedidos.filter((p) => p.clinicaId === clinicaId)
+    }
+
+    const emAndamento = pedidos.filter((p) => !p.concluido)
+    const concluidos = pedidos.filter((p) => p.concluido)
+    const atrasados = emAndamento.filter((p) => p.prazoStatus === 'ATRASADO')
+    const proximosVencimento = emAndamento.filter(
+      (p) => p.prazoStatus === 'PROXIMO_VENCIMENTO',
+    )
+
+    const correcoesVencidasItens: DashboardCorrecaoVencidaItem[] = []
+    for (const p of emAndamento) {
+      const status = resolveStatusPrazoCorrecao(data, p)
+      if (!status?.vencido) continue
+      const corretor = resolveCorretorPerfil(data, p)
+      correcoesVencidasItens.push({
+        pedidoId: p.id,
+        pedidoNumero: p.numero,
+        clinicaNome: p.clinica.nome,
+        valor: p.valor,
+        devolvidaEm: status.devolvidaEm,
+        prazoCorrecaoDias: status.prazoDias,
+        diasEmAtraso: Math.max(0, status.diasDecorridos - status.prazoDias),
+        vencimentoEm: status.vencimentoEm,
+        corretorPerfil: corretor ?? '—',
+        etapaDevolveuNome: status.etapaDevolveu?.nome ?? '—',
+      })
+    }
+    correcoesVencidasItens.sort((a, b) => b.diasEmAtraso - a.diasEmAtraso)
+
+    const etapas = data.workflowEtapas
+    const planilhaEnvio = data.pedidoPlanilhaEnvio
+
+    const diasFinalizacaoPlanilha = concluidos
+      .map((p) => diasEnvioAteConclusao(p, planilhaEnvio))
+      .filter((d): d is number => d != null)
+    const tempoMedioPagamento =
+      diasFinalizacaoPlanilha.length > 0
+        ? diasFinalizacaoPlanilha.reduce((acc, d) => acc + d, 0) / diasFinalizacaoPlanilha.length
+        : 0
+
+    const etapaMap = new Map<string, number[]>()
+    pedidos.forEach((p) => {
+      p.etapasHistorico.forEach((h) => {
+        if (h.dataConclusao) {
+          const dias = differenceInCalendarDays(
+            parseISO(h.dataConclusao),
+            parseISO(h.dataInicio),
+          )
+          const list = etapaMap.get(h.etapaNome) ?? []
+          list.push(dias)
+          etapaMap.set(h.etapaNome, list)
+        }
+      })
+    })
+
+    const tempoMedioPorEtapa = Array.from(etapaMap.entries()).map(([etapa, dias]) => ({
+      etapa,
+      dias: dias.reduce((a, b) => a + b, 0) / dias.length,
+    }))
+
+    const valorPagoMesPedidos = concluidos.filter(
+      (p) => differenceInCalendarDays(new Date(), parseISO(p.dataSolicitacao)) <= 30,
+    )
+    const valorPagoMes = valorPagoMesPedidos.reduce((acc, p) => acc + p.valor, 0)
+    const quantidadePagoMes = valorPagoMesPedidos.length
+
+    const aguardandoEmpenhoPedidos = emAndamento.filter((p) =>
+      isAguardandoEmpenhoNaSolempConfeccionada(p, etapas),
+    )
+    const aguardandoEmpenhoItens: AguardandoEmpenhoItem[] = aguardandoEmpenhoPedidos
+      .map((p) => {
+        const setor = resolveSetorOrigem(p)
+        return {
+          pedidoId: p.id,
+          pedidoNumero: p.numero,
+          solempNumero: p.solemp?.numero ?? '—',
+          valor: resolveValorEmpenhoDashboard(p, planilhaEnvio),
+          ...setor,
+          diasNaEtapa: p.diasNaEtapa,
+          dataSolicitacao: p.dataSolicitacao,
+        }
+      })
+      .sort((a, b) => b.valor - a.valor)
+    const valorAguardandoEmpenho = aguardandoEmpenhoItens.reduce((acc, item) => acc + item.valor, 0)
+    const quantidadeAguardandoEmpenho = aguardandoEmpenhoItens.length
+
+    const empenhadoItens: DashboardEmpenhadoItem[] = pedidos
+      .map((p) => {
+        const dataEmpenho = dataEmpenhadoDoPedido(p, etapas)
+        if (!dataEmpenho) return null
+        const dataParsed = parseISO(dataEmpenho)
+        if (!isValid(dataParsed)) return null
+        const setor = resolveSetorOrigem(p)
+        const mesLabelRaw = format(dataParsed, 'MMMM/yyyy', { locale: ptBR })
+        return {
+          pedidoId: p.id,
+          pedidoNumero: p.numero,
+          solempNumero: p.solemp?.numero ?? null,
+          empenhoNumero: resolveEmpenhoExibicao({
+            etiquetas: p.dadosClinica?.etiquetas,
+          }),
+          valor: resolveValorEmpenhoDashboard(p, planilhaEnvio),
+          dataEmpenho,
+          mesChave: format(dataParsed, 'yyyy-MM'),
+          mesLabel: mesLabelRaw.charAt(0).toUpperCase() + mesLabelRaw.slice(1),
+          ...setor,
+          clinicaNome: p.clinica.nome,
+          empresaNome: p.empresa.nomeFantasia,
+          dataSolicitacao: p.dataSolicitacao,
+        }
+      })
+      .filter((item): item is DashboardEmpenhadoItem => item !== null)
+      .sort((a, b) => (a.dataEmpenho < b.dataEmpenho ? 1 : -1))
+
+    const valorTotalEmpenhado = empenhadoItens.reduce((acc, item) => acc + item.valor, 0)
+    const quantidadeTotalEmpenhado = empenhadoItens.length
+    const dataPrimeiroEmpenho =
+      empenhadoItens.length === 0
+        ? null
+        : empenhadoItens.reduce(
+            (min, item) => (item.dataEmpenho < min ? item.dataEmpenho : min),
+            empenhadoItens[0].dataEmpenho,
+          )
+
+    const mesMap = new Map<string, EmpenhadoMesTotal>()
+    for (const item of empenhadoItens) {
+      const current = mesMap.get(item.mesChave) ?? {
+        mesChave: item.mesChave,
+        mesLabel: item.mesLabel,
+        valor: 0,
+        quantidade: 0,
+      }
+      current.valor += item.valor
+      current.quantidade += 1
+      mesMap.set(item.mesChave, current)
+    }
+    const totaisEmpenhadoPorMes = Array.from(mesMap.values()).sort((a, b) =>
+      a.mesChave < b.mesChave ? 1 : -1,
+    )
+
+    // Garante o mês corrente na lista (mesmo zerado) para o filtro
+    const mesAtualChave = format(new Date(), 'yyyy-MM')
+    if (!mesMap.has(mesAtualChave)) {
+      const mesAtualLabel = format(new Date(), 'MMMM/yyyy', { locale: ptBR })
+      totaisEmpenhadoPorMes.unshift({
+        mesChave: mesAtualChave,
+        mesLabel: mesAtualLabel.charAt(0).toUpperCase() + mesAtualLabel.slice(1),
+        valor: 0,
+        quantidade: 0,
+      })
+    }
+
+    const todosItens = pedidos.map((p) => toDashboardPedidoItem(p, etapas, planilhaEnvio))
+    const emAndamentoItens = emAndamento.map((p) =>
+      toDashboardPedidoItem(p, etapas, planilhaEnvio),
+    )
+    const concluidosItens = concluidos.map((p) =>
+      toDashboardPedidoItem(p, etapas, planilhaEnvio),
+    )
+    const atrasadosItens = atrasados.map((p) =>
+      toDashboardPedidoItem(p, etapas, planilhaEnvio),
+    )
+    const proximosVencimentoItens = proximosVencimento.map((p) =>
+      toDashboardPedidoItem(p, etapas, planilhaEnvio),
+    )
+    const pagoMesItens = valorPagoMesPedidos.map((p) =>
+      toDashboardPedidoItem(p, etapas, planilhaEnvio),
+    )
+
+    const clinicaRanking = new Map<string, { total: number; valor: number }>()
+    pedidos.forEach((p) => {
+      const current = clinicaRanking.get(p.clinica.nome) ?? { total: 0, valor: 0 }
+      clinicaRanking.set(p.clinica.nome, {
+        total: current.total + 1,
+        valor: current.valor + p.valor,
+      })
+    })
+
+    const empresaRanking = new Map<string, { total: number; valor: number }>()
+    pedidos.forEach((p) => {
+      const current = empresaRanking.get(p.empresa.nomeFantasia) ?? { total: 0, valor: 0 }
+      empresaRanking.set(p.empresa.nomeFantasia, {
+        total: current.total + 1,
+        valor: current.valor + p.valor,
+      })
+    })
+
+    const responsavelRanking = new Map<string, { total: number; atrasados: number }>()
+    emAndamento.forEach((p) => {
+      const nome = p.responsavelAtual?.nome ?? 'Não atribuído'
+      const current = responsavelRanking.get(nome) ?? { total: 0, atrasados: 0 }
+      responsavelRanking.set(nome, {
+        total: current.total + 1,
+        atrasados: current.atrasados + (p.prazoStatus === 'ATRASADO' ? 1 : 0),
+      })
+    })
+
+    const gargaloMap = new Map<string, { dias: number[]; atrasados: number }>()
+    emAndamento.forEach((p) => {
+      const current = gargaloMap.get(p.etapaAtual.nome) ?? { dias: [], atrasados: 0 }
+      current.dias.push(p.diasNaEtapa)
+      if (p.prazoStatus === 'ATRASADO') current.atrasados += 1
+      gargaloMap.set(p.etapaAtual.nome, current)
+    })
+
+    const meses = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun']
+    const processosPorMes = meses.map((mes, i) => ({
+      mes,
+      total: Math.floor(pedidos.length / 6) + (i % 3),
+      concluidos: Math.floor(concluidos.length / 6) + (i % 2),
+    }))
+
+    const valorPorEtapaMap = new Map<string, number>()
+    emAndamento.forEach((p) => {
+      valorPorEtapaMap.set(
+        p.etapaAtual.nome,
+        (valorPorEtapaMap.get(p.etapaAtual.nome) ?? 0) + p.valor,
+      )
+    })
+
+    const emAndamentoPorEtapaMap = new Map<
+      string,
+      { etapa: string; quantidade: number; ordem: number; valor: number }
+    >()
+    for (const p of emAndamento) {
+      for (const etapa of getEtapasAtivasPedido(p, etapas)) {
+        const current = emAndamentoPorEtapaMap.get(etapa.id) ?? {
+          etapa: etapa.nome,
+          quantidade: 0,
+          ordem: etapa.ordem,
+          valor: 0,
+        }
+        current.quantidade += 1
+        if (
+          etapa.chave === 'DIV_MAT_AUDITORIA' ||
+          etapa.chave === 'DIV_MAT_CONTABILIDADE_IMH'
+        ) {
+          current.valor += somarPctIndenizarDoPedido(data, p)
+        }
+        emAndamentoPorEtapaMap.set(etapa.id, current)
+      }
+    }
+    const emAndamentoPorEtapa = Array.from(emAndamentoPorEtapaMap.values())
+      .map((item) =>
+        item.valor > 0
+          ? item
+          : { etapa: item.etapa, quantidade: item.quantidade, ordem: item.ordem },
+      )
+      .sort((a, b) => a.ordem - b.ordem || a.etapa.localeCompare(b.etapa, 'pt-BR'))
+
+    return {
+      totalProcessos: pedidos.length,
+      emAndamento: emAndamento.length,
+      concluidos: concluidos.length,
+      atrasados: atrasados.length,
+      proximosVencimento: proximosVencimento.length,
+      correcoesVencidas: correcoesVencidasItens.length,
+      tempoMedioPagamento: Math.round(tempoMedioPagamento),
+      tempoMedioPorEtapa,
+      valorPagoMes,
+      quantidadePagoMes,
+      valorAguardandoEmpenho,
+      quantidadeAguardandoEmpenho,
+      aguardandoEmpenhoItens,
+      valorTotalEmpenhado,
+      quantidadeTotalEmpenhado,
+      dataPrimeiroEmpenho,
+      totaisEmpenhadoPorMes,
+      todosItens,
+      emAndamentoItens,
+      concluidosItens,
+      atrasadosItens,
+      proximosVencimentoItens,
+      correcoesVencidasItens,
+      pagoMesItens,
+      empenhadoItens,
+      rankingClinicas: Array.from(clinicaRanking.entries())
+        .map(([nome, v]) => ({ nome, ...v }))
+        .sort((a, b) => b.valor - a.valor)
+        .slice(0, 5),
+      rankingEmpresas: Array.from(empresaRanking.entries())
+        .map(([nome, v]) => ({ nome, ...v }))
+        .sort((a, b) => b.valor - a.valor)
+        .slice(0, 5),
+      rankingResponsaveis: Array.from(responsavelRanking.entries())
+        .map(([nome, v]) => ({ nome, ...v }))
+        .sort((a, b) => b.atrasados - a.atrasados)
+        .slice(0, 5),
+      rankingGargalos: Array.from(gargaloMap.entries())
+        .map(([etapa, v]) => ({
+          etapa,
+          mediaDias: v.dias.reduce((a, b) => a + b, 0) / (v.dias.length || 1),
+          atrasados: v.atrasados,
+        }))
+        .sort((a, b) => b.mediaDias - a.mediaDias)
+        .slice(0, 5),
+      processosPorMes,
+      valorPorEtapa: Array.from(valorPorEtapaMap.entries()).map(([etapa, valor]) => ({
+        etapa,
+        valor,
+      })),
+      emAndamentoPorEtapa,
+      ...(() => {
+        try {
+          const todas = coletarLinhasTotalIndenizado(data)
+          const { aIndenizar, indenizado } = separarLinhasIndenizadoPorStatus(todas)
+          const { opme, pme } = somarValoresPorOrigem(todas)
+          return {
+            valorASerIndenizadoLinhas: aIndenizar,
+            totalIndenizadoLinhas: indenizado,
+            valorTotalOpme: opme,
+            valorTotalPme: pme,
+            indenizadoMensalPorOrigem: serieMensalIndenizadoPorOrigem(indenizado, 12),
+          }
+        } catch (err) {
+          console.error('Falha ao coletar totais de indenização para o dashboard:', err)
+          return {
+            valorASerIndenizadoLinhas: [],
+            totalIndenizadoLinhas: [],
+            valorTotalOpme: 0,
+            valorTotalPme: 0,
+            indenizadoMensalPorOrigem: [],
+          }
+        }
+      })(),
+      ...(() => {
+        try {
+          return {
+            pessoasAtendidas: contarPessoasAtendidas(data),
+            procedimentos: contarProcedimentosDivMaterial(data),
+          }
+        } catch (err) {
+          console.error('Falha ao coletar pessoas/procedimentos para o dashboard:', err)
+          return {
+            pessoasAtendidas: 0,
+            procedimentos: 0,
+          }
+        }
+      })(),
+    }
+  },
+
+  persist(data: AppData): void {
+    saveAppData(data)
+  },
+
+  async deleteById(pedidoId: string, usuarioId: string): Promise<void> {
+    await delay(null, 300)
+
+    const demoSnapshot = peekDemoAppData()
+    if (demoSnapshot?.pedidos.some((p) => p.id === pedidoId)) {
+      assertGestorPodeExcluir(usuarioId, demoSnapshot)
+      removePedidosFromAppData(demoSnapshot, new Set([pedidoId]))
+      saveDemoAppData(demoSnapshot)
+      return
+    }
+
+    const data = await loadFreshAppData()
+    assertGestorPodeExcluir(usuarioId, data)
+
+    const pedido = data.pedidos.find((p) => p.id === pedidoId)
+    if (!pedido) throw new Error('Timeline não encontrada.')
+
+    removePedidosFromAppData(data, new Set([pedidoId]))
+    saveAppData(data)
+    if (useCloudAppDataSync()) {
+      await flushSupabaseAppDataSync()
+    }
+  },
+}

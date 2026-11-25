@@ -1,0 +1,1538 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Add as AddIcon, MenuBookOutlined as MenuBookIcon } from '@mui/icons-material'
+import {
+  Alert,
+  Autocomplete,
+  Box,
+  Button,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  Snackbar,
+  TextField,
+  Typography,
+} from '@mui/material'
+import type {
+  ImhMedicamentoFormData,
+  ImhMedicamentoLinha,
+  ListaMedicamentosFormData,
+  ListaMedicamentosLinha,
+} from '@/types'
+import { ConmedEscolherAbaModal } from '@/components/clinica/ConmedEscolherAbaModal'
+import { ImhMedicamentoPlanilhaPreview } from '@/components/clinica/ImhMedicamentoPlanilhaPreview'
+import {
+  PlanilhaEditSection,
+  PlanilhaLinhaEditDialog,
+  planilhaEditAutocompleteSlotProps,
+  planilhaEditFieldSx,
+} from '@/components/clinica/PlanilhaLinhaEditDialog'
+import { MedicamentoAbasExplicacaoModal } from '@/components/clinica/MedicamentoAbasExplicacaoModal'
+import { useClinicaAuth } from '@/contexts/AuthContext'
+import { usePortalPaths } from '@/contexts/DemoRouteContext'
+import { useClinicas } from '@/hooks/useCadastros'
+import { useCreateClinicaPedido, useClinicaPedidos, useReabrirFluxoImh } from '@/hooks/useClinicaPedidos'
+import { pedidoPlanilhaEnvioService } from '@/services/pedidoPlanilhaEnvioService'
+import {
+  createEmptyImhMedicamentoLinha,
+  formatImhMedData,
+  formatImhMedMoeda,
+  formatImhMedNip,
+  formatImhMedQtd,
+  formatImhMedUppercase,
+  imhMedicamentoLinhasToPedidoInput,
+  linhaImhMedicamentoHasContent,
+  markImhMedicamentoLinhasFinalized,
+  normalizeImhMedicamentoForm,
+  pctIndenizarFromVinculo,
+  withRecalculatedImhMedicamentoLinha,
+} from '@/utils/imhMedicamentoForm'
+import {
+  findImhMedicamentoSheetIndex,
+  loadImhMedicamentoSheetsFromFile,
+  mergeImhMedicamentoImport,
+  parseImhMedicamentoFromGrid,
+} from '@/utils/imhMedicamentoImport'
+import type { SpreadsheetSheetImport } from '@/utils/consumoMaterialOds'
+import {
+  ANOS_PLANILHA_DISPONIVEIS,
+  createPedidoLoteId,
+  dataPertenceAoMes,
+  findPedidoParaMesmasLinhas,
+  getMesModeloFromParts,
+  type MesConsumoModelo,
+} from '@/utils/consumoMaterialTemplate'
+import {
+  formatPrecoReferenciaMedicamento,
+  getMedicamentosPrecosCatalog,
+} from '@/utils/medicamentosPrecos'
+import {
+  ensurePacientePmeFromLancamento,
+  findPacientePmeByNome,
+  formatPacientePmeUpper,
+  normalizePacienteNipKey,
+  pacienteNipsIguais,
+  resolvePacientePmeFromNip,
+  searchPacientesPmeByNome,
+  type PacientePmeNipMatch,
+  type PacientePmeRow,
+} from '@/utils/pacientesPme'
+import {
+  baixarEstoqueListaMedicamentos,
+  devolverEstoqueListaMedicamentos,
+  findListaMedicamentoByNome,
+  findListaMedicamentoByNomeELote,
+  previewBaixaEstoqueListaMedicamentos,
+  resolveListaMedicamentoEstoque,
+} from '@/utils/listaMedicamentosForm'
+
+interface ImhMedicamentoFormProps {
+  value: ImhMedicamentoFormData
+  onChange: (next: ImhMedicamentoFormData) => void
+  pacientes?: PacientePmeRow[]
+  onPacientesChange?: (next: PacientePmeRow[]) => void
+  listaMedicamentos?: ListaMedicamentosFormData
+  onListaMedicamentosChange?: (next: ListaMedicamentosFormData) => void
+  /** Pedido devolvido sendo corrigido (reenvio no mesmo pedido). */
+  corrigirPedidoId?: string | null
+  /** Quando definido, a grade já vem filtrada; pré-seleciona e reabre o pedido. */
+  corrigirLinhaIds?: Set<string> | null
+}
+
+const VINCULOS = [
+  'TITULAR',
+  'DEPENDENTE DIRETO',
+  'DEPENDENTE INDIRETO',
+  'DEPENDENTE',
+  'OUTRO',
+] as const
+const NIP_NAO_ENCONTRADO = 'NIP NÃO ENCONTRADO NO SISTEMA'
+const MEDICAMENTO_SEM_LOTE = 'Medicamento sem lote definido'
+
+const MESES_OPCOES = [
+  { value: 1, label: 'Janeiro' },
+  { value: 2, label: 'Fevereiro' },
+  { value: 3, label: 'Março' },
+  { value: 4, label: 'Abril' },
+  { value: 5, label: 'Maio' },
+  { value: 6, label: 'Junho' },
+  { value: 7, label: 'Julho' },
+  { value: 8, label: 'Agosto' },
+  { value: 9, label: 'Setembro' },
+  { value: 10, label: 'Outubro' },
+  { value: 11, label: 'Novembro' },
+  { value: 12, label: 'Dezembro' },
+] as const
+
+function diasNoMes(mes: number, ano: number): number {
+  return new Date(ano, mes, 0).getDate()
+}
+
+function dataPertenceAoDia(
+  data: string,
+  dia: number,
+  mesModelo: MesConsumoModelo,
+): boolean {
+  if (!dataPertenceAoMes(data, mesModelo)) return false
+  if (dia <= 0) return true
+  const match = data.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/)
+  if (!match) return false
+  return parseInt(match[1], 10) === dia
+}
+
+function anosDisponiveisImh(linhas: ImhMedicamentoLinha[]): number[] {
+  const anos = new Set<number>(ANOS_PLANILHA_DISPONIVEIS)
+  anos.add(new Date().getFullYear())
+  for (const linha of linhas) {
+    const match = linha.data.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/)
+    if (!match) continue
+    const yearRaw = match[3]
+    const year = yearRaw.length === 2 ? 2000 + parseInt(yearRaw, 10) : parseInt(yearRaw, 10)
+    if (Number.isFinite(year)) anos.add(year)
+  }
+  return [...anos].sort((a, b) => b - a)
+}
+
+function matchToDraftPatch(
+  match: PacientePmeNipMatch,
+  nipDigitado: string,
+): Partial<Omit<ImhMedicamentoLinha, 'id' | 'total'>> {
+  const nipFmt = formatImhMedNip(nipDigitado)
+  const { row, isTitular } = match
+  const nipUsuario = formatImhMedNip(row.nipUsuario) || nipFmt
+  const vinculoPlanilha = formatImhMedUppercase(row.vinculo)
+  const pctIndenizar = pctIndenizarFromVinculo(vinculoPlanilha) ?? undefined
+
+  if (isTitular) {
+    return {
+      nip: nipUsuario,
+      nome: formatImhMedUppercase(row.nome),
+      nipTitular: nipUsuario,
+      postoGrad: formatImhMedUppercase(row.postoGradTitular),
+      vinculo: vinculoPlanilha,
+      ...(pctIndenizar ? { pctIndenizar } : {}),
+    }
+  }
+
+  return {
+    nip: nipUsuario,
+    nome: formatImhMedUppercase(row.nome),
+    nipTitular: formatImhMedNip(row.nipTitular),
+    postoGrad: formatImhMedUppercase(row.postoGradTitular),
+    vinculo: vinculoPlanilha,
+    ...(pctIndenizar ? { pctIndenizar } : {}),
+  }
+}
+
+/** Preenchimento ao escolher paciente pelo nome (sempre linha de NIP DO USUÁRIO). */
+function pacienteUsuarioToDraftPatch(
+  paciente: PacientePmeRow,
+): Partial<Omit<ImhMedicamentoLinha, 'id' | 'total'>> {
+  return matchToDraftPatch(
+    {
+      row: paciente,
+      isTitular: pacienteNipsIguais(paciente),
+    },
+    paciente.nipUsuario,
+  )
+}
+
+const compactFieldSx = {
+  '& .MuiInputBase-root': { fontSize: '0.78rem' },
+  '& .MuiInputBase-input': { fontSize: '0.78rem', py: 0.65 },
+  '& .MuiInputLabel-root': { fontSize: '0.78rem' },
+} as const
+
+const multilineFieldSx = {
+  ...compactFieldSx,
+  gridColumn: '1 / -1',
+  '& .MuiInputBase-root': {
+    fontSize: '0.78rem',
+    alignItems: 'flex-start',
+  },
+  '& .MuiInputBase-input': {
+    fontSize: '0.78rem',
+    lineHeight: 1.35,
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
+  },
+} as const
+
+function cloneLinha(linha: ImhMedicamentoLinha): ImhMedicamentoLinha {
+  return { ...linha }
+}
+
+export function ImhMedicamentoForm({
+  value,
+  onChange,
+  pacientes = [],
+  onPacientesChange,
+  listaMedicamentos,
+  onListaMedicamentosChange,
+  corrigirPedidoId = null,
+  corrigirLinhaIds = null,
+}: ImhMedicamentoFormProps) {
+  const { navigatePortal } = usePortalPaths()
+  const { user } = useClinicaAuth()
+  const clinicaId = user?.clinicaId ?? ''
+  const { data: clinicas = [] } = useClinicas()
+  const { data: pedidos = [] } = useClinicaPedidos()
+  const createPedido = useCreateClinicaPedido()
+  const reabrirImh = useReabrirFluxoImh()
+  const clinicaLogada = clinicas.find((c) => c.id === clinicaId)
+  const catalog = useMemo(() => getMedicamentosPrecosCatalog(), [])
+  /** Select do ITEM (PME): apenas medicamentos cadastrados na aba Lista de Medicamentos. */
+  const medicamentoOptions = useMemo((): ListaMedicamentosLinha[] => {
+    return (listaMedicamentos?.linhas ?? []).filter((l) => l.medicamento.trim())
+  }, [listaMedicamentos])
+  /** Fallback de preço quando a Lista ainda não tem o item. */
+  const precoFallbackOptions = useMemo((): ListaMedicamentosLinha[] => {
+    if (medicamentoOptions.length > 0) return medicamentoOptions
+    return catalog.map((row) => ({
+      id: row.id,
+      neb: row.neb,
+      medicamento: row.medicamento,
+      lote: '',
+      validade: '',
+      uf: row.uf,
+      qtd: '',
+      estoqueBaixo: '',
+      avisoValidadeDias: '',
+      precoReferencia: row.precoReferencia,
+    }))
+  }, [medicamentoOptions, catalog])
+
+  const precoTabelaDaLinha = (linha: Pick<ImhMedicamentoLinha, 'itemPme' | 'lote' | 'listaMedicamentoId'>) => {
+    const form = listaMedicamentos?.linhas?.some((item) => item.medicamento.trim())
+      ? listaMedicamentos
+      : { linhas: precoFallbackOptions }
+    const row =
+      resolveListaMedicamentoEstoque(form, linha.itemPme, linha.lote, linha.listaMedicamentoId) ??
+      findListaMedicamentoByNome(linha.itemPme, form)
+    const preco = row?.precoReferencia?.trim() ?? ''
+    return preco ? formatPrecoReferenciaMedicamento(preco) || preco : ''
+  }
+
+  const recalcLinha = (linha: ImhMedicamentoLinha) =>
+    withRecalculatedImhMedicamentoLinha(linha, precoTabelaDaLinha(linha))
+
+  const [linhaDraft, setLinhaDraft] = useState<ImhMedicamentoLinha>(() =>
+    createEmptyImhMedicamentoLinha(),
+  )
+  const [itemPmeInput, setItemPmeInput] = useState('')
+  const [nomeInput, setNomeInput] = useState('')
+  const [editingLinhaId, setEditingLinhaId] = useState<string | null>(null)
+  const [sheetExpanded, setSheetExpanded] = useState(false)
+  const [isAdding, setIsAdding] = useState(false)
+  const linhaSnapshotRef = useRef<ImhMedicamentoLinha | null>(null)
+  const linhaFormRef = useRef<HTMLDivElement | null>(null)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
+  const nipAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [nipNaoCadastrado, setNipNaoCadastrado] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [isEnviando, setIsEnviando] = useState(false)
+  const [explicacaoOpen, setExplicacaoOpen] = useState(false)
+  const [dataAvisoOpen, setDataAvisoOpen] = useState(false)
+  const [dataError, setDataError] = useState(false)
+  const [loteSemDefinir, setLoteSemDefinir] = useState(false)
+  const [loteAviso, setLoteAviso] = useState<string | null>(null)
+  const [estoqueInsuficiente, setEstoqueInsuficiente] = useState<{
+    open: boolean
+    modo: 'add' | 'edit'
+    linha: ImhMedicamentoLinha | null
+    medicamento: string
+    lote: string
+    estoqueAtual: number
+    qtdBaixa: number
+    estoqueApos: number
+  }>({
+    open: false,
+    modo: 'add',
+    linha: null,
+    medicamento: '',
+    lote: '',
+    estoqueAtual: 0,
+    qtdBaixa: 0,
+    estoqueApos: 0,
+  })
+  const [selectedImhIds, setSelectedImhIds] = useState<Set<string>>(() => new Set())
+  const [sheetPicker, setSheetPicker] = useState<{
+    open: boolean
+    fileName: string
+    sheets: SpreadsheetSheetImport[]
+    initialSheetIndex: number
+  }>({ open: false, fileName: '', sheets: [], initialSheetIndex: 0 })
+  const [importFeedback, setImportFeedback] = useState<{
+    open: boolean
+    severity: 'success' | 'error'
+    message: string
+  }>({ open: false, severity: 'success', message: '' })
+  /** Ao montar (abrir a aba IMH), sempre inicia no mês/ano vigentes. */
+  const [filtroMes, setFiltroMes] = useState(() => new Date().getMonth() + 1)
+  const [filtroAno, setFiltroAno] = useState(() => new Date().getFullYear())
+  const [filtroDia, setFiltroDia] = useState(0)
+
+  const mesFiltro = useMemo(
+    () => getMesModeloFromParts(filtroMes, filtroAno),
+    [filtroMes, filtroAno],
+  )
+  const diasOptions = useMemo(
+    () => Array.from({ length: diasNoMes(filtroMes, filtroAno) }, (_, i) => i + 1),
+    [filtroMes, filtroAno],
+  )
+  const anosOptions = useMemo(() => anosDisponiveisImh(value.linhas), [value.linhas])
+  const linhasFiltradas = useMemo(() => {
+    if (corrigirLinhaIds && corrigirLinhaIds.size > 0) {
+      return value.linhas.filter((linha) => corrigirLinhaIds.has(linha.id))
+    }
+    return value.linhas.filter((linha) =>
+      dataPertenceAoDia(linha.data, filtroDia, mesFiltro),
+    )
+  }, [value.linhas, filtroDia, mesFiltro, corrigirLinhaIds])
+  const valueFiltrado = useMemo(
+    () => ({ ...value, linhas: linhasFiltradas }),
+    [value, linhasFiltradas],
+  )
+  const mesReferenciaLabel = useMemo(() => {
+    if (corrigirLinhaIds && corrigirLinhaIds.size > 0) {
+      return 'linhas devolvidas para correção'
+    }
+    const mesNome = MESES_OPCOES.find((m) => m.value === filtroMes)?.label ?? String(filtroMes)
+    if (filtroDia > 0) return `${String(filtroDia).padStart(2, '0')}/${mesNome}/${filtroAno}`
+    return `${mesNome}/${filtroAno}`
+  }, [filtroDia, filtroMes, filtroAno, corrigirLinhaIds])
+  const emptyHint =
+    value.linhas.length > 0 && linhasFiltradas.length === 0
+      ? `Nenhum lançamento em ${mesReferenciaLabel}. Altere o dia/mês/ano ou use Adicionar lançamento / Importar.`
+      : 'Use Adicionar lançamento, Importar planilha ou expanda a planilha e clique em Editar.'
+
+  useEffect(() => {
+    if (!corrigirLinhaIds || corrigirLinhaIds.size === 0) return
+    setSelectedImhIds(new Set([...corrigirLinhaIds].filter((id) =>
+      value.linhas.some((l) => l.id === id),
+    )))
+  }, [corrigirPedidoId, corrigirLinhaIds, value.linhas])
+
+  const handleFiltroMesChange = (mes: number) => {
+    setFiltroMes(mes)
+    const maxDia = diasNoMes(mes, filtroAno)
+    if (filtroDia > maxDia) setFiltroDia(0)
+  }
+
+  const handleFiltroAnoChange = (ano: number) => {
+    setFiltroAno(ano)
+    const maxDia = diasNoMes(filtroMes, ano)
+    if (filtroDia > maxDia) setFiltroDia(0)
+  }
+
+  useEffect(
+    () => () => {
+      if (nipAlertTimerRef.current) clearTimeout(nipAlertTimerRef.current)
+    },
+    [],
+  )
+
+  const showNipNaoCadastrado = () => {
+    setNipNaoCadastrado(true)
+    if (nipAlertTimerRef.current) clearTimeout(nipAlertTimerRef.current)
+    nipAlertTimerRef.current = setTimeout(() => {
+      setNipNaoCadastrado(false)
+      nipAlertTimerRef.current = null
+    }, 5000)
+  }
+
+  const vinculoOptions = useMemo(() => {
+    const set = new Set<string>([...VINCULOS])
+    if (linhaDraft.vinculo.trim()) set.add(linhaDraft.vinculo.trim())
+    return [...set]
+  }, [linhaDraft.vinculo])
+
+  const selectedPacienteNome = findPacientePmeByNome(linhaDraft.nome, pacientes) ?? null
+
+  const applyImportedSheet = (sheet: SpreadsheetSheetImport) => {
+    const parsed = normalizeImhMedicamentoForm(parseImhMedicamentoFromGrid(sheet.rows))
+    if (parsed.linhas.length === 0) {
+      setImportFeedback({
+        open: true,
+        severity: 'error',
+        message:
+          'Não foi possível identificar dados do Modelo IHM — PME nessa aba. Verifique o layout.',
+      })
+      return
+    }
+    onChange(mergeImhMedicamentoImport(value, parsed))
+    setImportFeedback({
+      open: true,
+      severity: 'success',
+      message: `Planilha importada${sheet.nome ? ` (aba “${sheet.nome}”)` : ''}: ${parsed.linhas.length} lançamento(s).`,
+    })
+  }
+
+  const handleImportClick = () => {
+    importInputRef.current?.click()
+  }
+
+  const handleImportFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setImporting(true)
+    try {
+      const sheets = await loadImhMedicamentoSheetsFromFile(file)
+      if (sheets.length === 0) {
+        setImportFeedback({
+          open: true,
+          severity: 'error',
+          message: 'O arquivo não contém abas legíveis.',
+        })
+        return
+      }
+      if (sheets.length === 1) {
+        applyImportedSheet(sheets[0])
+        return
+      }
+      const preferred = findImhMedicamentoSheetIndex(sheets)
+      setSheetPicker({
+        open: true,
+        fileName: file.name,
+        sheets,
+        initialSheetIndex: preferred >= 0 ? preferred : 0,
+      })
+    } catch (err) {
+      setImportFeedback({
+        open: true,
+        severity: 'error',
+        message: err instanceof Error ? err.message : 'Falha ao ler a planilha.',
+      })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const handleConfirmSheet = (sheetIndex: number) => {
+    const sheet = sheetPicker.sheets[sheetIndex]
+    setSheetPicker({ open: false, fileName: '', sheets: [], initialSheetIndex: 0 })
+    if (sheet) applyImportedSheet(sheet)
+  }
+
+  const persistLinhas = (linhas: ImhMedicamentoLinha[]) => {
+    const nextLinhas = linhas
+      .map(recalcLinha)
+      .filter((l) => linhaImhMedicamentoHasContent(l))
+    const ids = new Set(nextLinhas.map((l) => l.id))
+    onChange({
+      linhas: nextLinhas,
+      finalizedImhIds: (value.finalizedImhIds ?? []).filter((id) => ids.has(id)),
+      devolvidosImhIds: (value.devolvidosImhIds ?? []).filter((id) => ids.has(id)),
+    })
+  }
+
+  const handleEnviarImh = async () => {
+    const clinicaNome = clinicaLogada?.nome ?? ''
+    if (!clinicaNome || !clinicaId) {
+      setImportFeedback({
+        open: true,
+        severity: 'error',
+        message: 'Não foi possível identificar a clínica logada para o envio.',
+      })
+      return
+    }
+
+    const finalized = new Set(value.finalizedImhIds ?? [])
+    const selecionadas = value.linhas.filter(
+      (linha) =>
+        selectedImhIds.has(linha.id) &&
+        !finalized.has(linha.id) &&
+        linhaImhMedicamentoHasContent(linha),
+    )
+    if (selecionadas.length === 0) {
+      setImportFeedback({
+        open: true,
+        severity: 'error',
+        message: 'Selecione ao menos um lançamento na coluna IMH para enviar.',
+      })
+      return
+    }
+
+    setIsEnviando(true)
+    try {
+      const ids = selecionadas.map((l) => l.id)
+      let pedidoId: string
+
+      if (corrigirPedidoId && pedidos.some((p) => p.id === corrigirPedidoId)) {
+        pedidoId = corrigirPedidoId
+        await reabrirImh.mutateAsync({ pedidoId })
+      } else {
+        const pedidoExistente = findPedidoParaMesmasLinhas(pedidos, ids, clinicaId)
+        if (pedidoExistente) {
+          pedidoId = pedidoExistente.id
+          await reabrirImh.mutateAsync({ pedidoId })
+        } else {
+          pedidoId = createPedidoLoteId()
+          await createPedido.mutateAsync({
+            ...imhMedicamentoLinhasToPedidoInput(selecionadas, clinicaNome),
+            id: pedidoId,
+            fluxo: 'imh',
+          })
+        }
+      }
+      pedidoPlanilhaEnvioService.saveImhMedicamentoForPedido(pedidoId, selecionadas)
+
+      onChange(markImhMedicamentoLinhasFinalized(value, ids))
+      setSelectedImhIds((prev) => {
+        const next = new Set(prev)
+        for (const id of ids) next.delete(id)
+        return next
+      })
+      setImportFeedback({
+        open: true,
+        severity: 'success',
+        message: `${selecionadas.length} lançamento(s) enviados para IMH.`,
+      })
+      navigatePortal(`/clinica/timeline/${pedidoId}`)
+    } catch {
+      setImportFeedback({
+        open: true,
+        severity: 'error',
+        message: 'Erro ao enviar lançamentos para IMH. Tente novamente.',
+      })
+    } finally {
+      setIsEnviando(false)
+    }
+  }
+
+  const syncDraftToList = (nextDraft: ImhMedicamentoLinha) => {
+    const ready = recalcLinha(nextDraft)
+    setLinhaDraft(ready)
+    setNomeInput(ready.nome)
+    if (!editingLinhaId) return
+    persistLinhas(
+      value.linhas.map((l) => (l.id === editingLinhaId ? { ...ready, id: editingLinhaId } : l)),
+    )
+  }
+
+  const updateDraft = (patch: Partial<Omit<ImhMedicamentoLinha, 'id' | 'total'>>) => {
+    const nextPatch =
+      patch.vinculo !== undefined
+        ? {
+            ...patch,
+            pctIndenizar: pctIndenizarFromVinculo(patch.vinculo) ?? '',
+          }
+        : patch
+    syncDraftToList({ ...linhaDraft, ...nextPatch })
+  }
+
+  const applyPacienteSelection = (paciente: PacientePmeRow | null) => {
+    if (!paciente) return
+    setNipNaoCadastrado(false)
+    if (nipAlertTimerRef.current) {
+      clearTimeout(nipAlertTimerRef.current)
+      nipAlertTimerRef.current = null
+    }
+    syncDraftToList({
+      ...linhaDraft,
+      ...pacienteUsuarioToDraftPatch(paciente),
+    })
+  }
+
+  const applyNipMatch = (match: PacientePmeNipMatch, nipDigitado: string) => {
+    setNipNaoCadastrado(false)
+    if (nipAlertTimerRef.current) {
+      clearTimeout(nipAlertTimerRef.current)
+      nipAlertTimerRef.current = null
+    }
+    syncDraftToList({
+      ...linhaDraft,
+      ...matchToDraftPatch(match, nipDigitado),
+    })
+  }
+
+  const tryFillFromNip = (nipRaw: string, { alertIfMissing }: { alertIfMissing: boolean }) => {
+    const digits = normalizePacienteNipKey(nipRaw)
+    if (!digits) return
+    const match = resolvePacientePmeFromNip(nipRaw, pacientes)
+    if (match) {
+      applyNipMatch(match, nipRaw)
+      return
+    }
+    if (alertIfMissing && digits.length >= 6) {
+      showNipNaoCadastrado()
+    }
+  }
+
+  const tryFillFromNome = (nomeRaw: string) => {
+    const found = findPacientePmeByNome(nomeRaw, pacientes)
+    if (found) applyPacienteSelection(found)
+  }
+
+  const applyMedicamentoSelection = (row: ListaMedicamentosLinha | null) => {
+    if (!row) {
+      updateDraft({
+        itemPme: '',
+        lote: '',
+        validade: '',
+        listaMedicamentoId: undefined,
+      })
+      setItemPmeInput('')
+      setLoteSemDefinir(false)
+      setLoteAviso(null)
+      return
+    }
+    const unitario = formatPrecoReferenciaMedicamento(row.precoReferencia)
+    const lote = formatImhMedUppercase(row.lote)
+    const validade = formatImhMedData(row.validade)
+    const aviso = !lote.trim() ? MEDICAMENTO_SEM_LOTE : null
+    updateDraft({
+      itemPme: formatImhMedUppercase(row.medicamento),
+      lote,
+      validade,
+      listaMedicamentoId: row.id,
+      valorUnitario: unitario,
+      unidadeFornecimento:
+        linhaDraft.unidadeFornecimento.trim() || formatImhMedUppercase(row.uf),
+      qtd: linhaDraft.qtd.trim() || '1',
+    })
+    setItemPmeInput(row.medicamento)
+    setLoteSemDefinir(Boolean(aviso))
+    setLoteAviso(aviso)
+  }
+
+  const withListaEstoqueMeta = (linha: ImhMedicamentoLinha): ImhMedicamentoLinha => {
+    const resolved = resolveListaMedicamentoEstoque(
+      listaMedicamentos,
+      linha.itemPme,
+      linha.lote,
+      linha.listaMedicamentoId,
+    )
+    return {
+      ...linha,
+      listaMedicamentoId: resolved?.id ?? linha.listaMedicamentoId,
+      estoqueQtdMovida: linha.qtd,
+    }
+  }
+
+  const resetLinhaForm = () => {
+    setLinhaDraft(createEmptyImhMedicamentoLinha())
+    setItemPmeInput('')
+    setNomeInput('')
+    setEditingLinhaId(null)
+    setDataError(false)
+    setLoteSemDefinir(false)
+    setLoteAviso(null)
+    linhaSnapshotRef.current = null
+    setIsAdding(false)
+  }
+
+  const syncPacienteFromLancamento = (linha: ImhMedicamentoLinha) => {
+    if (!onPacientesChange) return
+    if (!normalizePacienteNipKey(linha.nip)) return
+    const next = ensurePacientePmeFromLancamento(pacientes, {
+      nip: linha.nip,
+      nome: linha.nome,
+      nipTitular: linha.nipTitular,
+      postoGrad: linha.postoGrad,
+      vinculo: linha.vinculo,
+    })
+    if (next === pacientes) return
+    onPacientesChange(next)
+    setNipNaoCadastrado(false)
+    if (nipAlertTimerRef.current) {
+      clearTimeout(nipAlertTimerRef.current)
+      nipAlertTimerRef.current = null
+    }
+  }
+
+  const qtdMovidaEstoque = (linha: ImhMedicamentoLinha) =>
+    (linha.estoqueQtdMovida?.trim() || linha.qtd).trim()
+
+  const baixarEstoqueDoLancamento = (linha: ImhMedicamentoLinha) => {
+    if (!listaMedicamentos || !onListaMedicamentosChange) return
+    if (!linha.itemPme.trim() && !linha.listaMedicamentoId?.trim()) return
+    const next = baixarEstoqueListaMedicamentos(
+      listaMedicamentos,
+      linha.itemPme,
+      linha.lote,
+      qtdMovidaEstoque(linha),
+      linha.listaMedicamentoId,
+    )
+    if (next === listaMedicamentos) return
+    onListaMedicamentosChange(next)
+  }
+
+  const devolverEstoqueDoLancamento = (linha: ImhMedicamentoLinha) => {
+    if (!listaMedicamentos || !onListaMedicamentosChange) return
+    if (!linha.itemPme.trim() && !linha.listaMedicamentoId?.trim()) return
+    const next = devolverEstoqueListaMedicamentos(
+      listaMedicamentos,
+      linha.itemPme,
+      linha.lote,
+      qtdMovidaEstoque(linha),
+      linha.listaMedicamentoId,
+    )
+    if (next === listaMedicamentos) return
+    onListaMedicamentosChange(next)
+  }
+
+  /** Simula devolução do lançamento anterior e prevê a nova baixa (edição). */
+  const previewBaixaAposDevolverLancamento = (
+    snapshot: ImhMedicamentoLinha,
+    ready: ImhMedicamentoLinha,
+  ) => {
+    const formAposDevolver =
+      listaMedicamentos &&
+      devolverEstoqueListaMedicamentos(
+        listaMedicamentos,
+        snapshot.itemPme,
+        snapshot.lote,
+        qtdMovidaEstoque(snapshot),
+        snapshot.listaMedicamentoId,
+      )
+    return previewBaixaEstoqueListaMedicamentos(
+      formAposDevolver || listaMedicamentos,
+      ready.itemPme,
+      ready.lote,
+      ready.qtd,
+      ready.listaMedicamentoId,
+    )
+  }
+
+  const confirmarAdicaoComBaixa = (ready: ImhMedicamentoLinha) => {
+    const readyMeta = withListaEstoqueMeta(ready)
+    persistLinhas([...value.linhas, readyMeta])
+    syncPacienteFromLancamento(readyMeta)
+    baixarEstoqueDoLancamento(readyMeta)
+    resetLinhaForm()
+  }
+
+  const confirmarEdicaoComAjusteEstoque = (ready: ImhMedicamentoLinha) => {
+    if (!editingLinhaId) return
+    const snapshot = linhaSnapshotRef.current
+    const readyMeta = withListaEstoqueMeta({ ...ready, id: editingLinhaId })
+    if (listaMedicamentos && onListaMedicamentosChange && snapshot) {
+      let next = devolverEstoqueListaMedicamentos(
+        listaMedicamentos,
+        snapshot.itemPme,
+        snapshot.lote,
+        qtdMovidaEstoque(snapshot),
+        snapshot.listaMedicamentoId,
+      )
+      next = baixarEstoqueListaMedicamentos(
+        next,
+        readyMeta.itemPme,
+        readyMeta.lote,
+        qtdMovidaEstoque(readyMeta),
+        readyMeta.listaMedicamentoId,
+      )
+      if (next !== listaMedicamentos) onListaMedicamentosChange(next)
+    }
+    persistLinhas(
+      value.linhas.map((l) => (l.id === editingLinhaId ? readyMeta : l)),
+    )
+    syncPacienteFromLancamento(readyMeta)
+    resetLinhaForm()
+  }
+
+  const handleAdicionarLinha = () => {
+    const readyBase = recalcLinha(linhaDraft)
+    const ready = withListaEstoqueMeta(readyBase)
+    if (!ready.data.trim()) {
+      setDataError(true)
+      setDataAvisoOpen(true)
+      return
+    }
+    setDataError(false)
+    if (editingLinhaId) {
+      const snapshot = linhaSnapshotRef.current
+      if (snapshot) {
+        const preview = previewBaixaAposDevolverLancamento(snapshot, ready)
+        if (preview?.encontrado && preview.insuficiente) {
+          setEstoqueInsuficiente({
+            open: true,
+            modo: 'edit',
+            linha: ready,
+            medicamento: preview.medicamento,
+            lote: preview.lote,
+            estoqueAtual: preview.estoqueAtual,
+            qtdBaixa: preview.qtdBaixa,
+            estoqueApos: preview.estoqueApos,
+          })
+          return
+        }
+      }
+      confirmarEdicaoComAjusteEstoque(ready)
+      return
+    }
+    if (!linhaImhMedicamentoHasContent(ready)) {
+      resetLinhaForm()
+      return
+    }
+
+    const preview = previewBaixaEstoqueListaMedicamentos(
+      listaMedicamentos,
+      ready.itemPme,
+      ready.lote,
+      ready.qtd,
+      ready.listaMedicamentoId,
+    )
+    if (preview?.encontrado && preview.insuficiente) {
+      setEstoqueInsuficiente({
+        open: true,
+        modo: 'add',
+        linha: ready,
+        medicamento: preview.medicamento,
+        lote: preview.lote,
+        estoqueAtual: preview.estoqueAtual,
+        qtdBaixa: preview.qtdBaixa,
+        estoqueApos: preview.estoqueApos,
+      })
+      return
+    }
+
+    confirmarAdicaoComBaixa(ready)
+  }
+
+  const handleConfirmarEstoqueInsuficiente = () => {
+    const pending = estoqueInsuficiente.linha
+    const modo = estoqueInsuficiente.modo
+    setEstoqueInsuficiente((prev) => ({ ...prev, open: false, linha: null }))
+    if (!pending) return
+    if (modo === 'edit') {
+      confirmarEdicaoComAjusteEstoque(pending)
+      return
+    }
+    confirmarAdicaoComBaixa(pending)
+  }
+
+  const handleCancelarEstoqueInsuficiente = () => {
+    setEstoqueInsuficiente((prev) => ({ ...prev, open: false, linha: null }))
+  }
+
+  const handleEditLinha = (id: string) => {
+    const found = value.linhas.find((l) => l.id === id)
+    if (!found) return
+    setIsAdding(false)
+    linhaSnapshotRef.current = cloneLinha(found)
+    setEditingLinhaId(id)
+    setLinhaDraft(cloneLinha(found))
+    setItemPmeInput(found.itemPme)
+    setNomeInput(found.nome)
+    setLoteSemDefinir(Boolean(found.itemPme.trim()) && !found.lote.trim())
+    setLoteAviso(
+      found.itemPme.trim() && !found.lote.trim() ? MEDICAMENTO_SEM_LOTE : null,
+    )
+    if (!sheetExpanded) {
+      requestAnimationFrame(() => {
+        linhaFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      })
+    }
+  }
+
+  const handleDeleteLinha = (id: string) => {
+    const removida = value.linhas.find((l) => l.id === id)
+    persistLinhas(value.linhas.filter((l) => l.id !== id))
+    if (removida) devolverEstoqueDoLancamento(removida)
+    if (editingLinhaId === id) resetLinhaForm()
+  }
+
+  const handleCancelLinha = () => {
+    if (editingLinhaId && linhaSnapshotRef.current) {
+      persistLinhas(
+        value.linhas.map((l) =>
+          l.id === editingLinhaId ? cloneLinha(linhaSnapshotRef.current!) : l,
+        ),
+      )
+    }
+    resetLinhaForm()
+  }
+
+  const handleNovoLancamento = () => {
+    resetLinhaForm()
+    setLinhaDraft(createEmptyImhMedicamentoLinha())
+    setItemPmeInput('')
+    setNomeInput('')
+    setIsAdding(true)
+  }
+
+  const selectedMedicamento =
+    findListaMedicamentoByNomeELote(linhaDraft.itemPme, linhaDraft.lote, {
+      linhas: medicamentoOptions,
+    }) ??
+    (linhaDraft.lote.trim()
+      ? null
+      : findListaMedicamentoByNome(linhaDraft.itemPme, { linhas: medicamentoOptions }))
+
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1.5, minWidth: 0 }}>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 1,
+          flexWrap: 'wrap',
+        }}
+      >
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={<AddIcon />}
+            onClick={handleNovoLancamento}
+            disabled={isEnviando || Boolean(editingLinhaId) || isAdding}
+            sx={{ textTransform: 'none', fontWeight: 700 }}
+          >
+            Adicionar lançamento
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            startIcon={<MenuBookIcon sx={{ fontSize: 16 }} />}
+            onClick={() => setExplicacaoOpen(true)}
+            sx={{ textTransform: 'none', fontWeight: 800, fontSize: 12, borderRadius: 2 }}
+          >
+            Explicação Detalhada
+          </Button>
+        </Box>
+        <Box sx={{ display: 'flex', gap: 1, alignItems: 'center', flexWrap: 'wrap' }}>
+          <FormControl size="small" sx={{ minWidth: 88 }}>
+            <InputLabel id="imh-med-filtro-dia-label">Dia</InputLabel>
+            <Select
+              labelId="imh-med-filtro-dia-label"
+              label="Dia"
+              value={filtroDia}
+              onChange={(e) => setFiltroDia(Number(e.target.value))}
+            >
+              <MenuItem value={0}>Todos</MenuItem>
+              {diasOptions.map((dia) => (
+                <MenuItem key={dia} value={dia}>
+                  {String(dia).padStart(2, '0')}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 130 }}>
+            <InputLabel id="imh-med-filtro-mes-label">Mês</InputLabel>
+            <Select
+              labelId="imh-med-filtro-mes-label"
+              label="Mês"
+              value={filtroMes}
+              onChange={(e) => handleFiltroMesChange(Number(e.target.value))}
+            >
+              {MESES_OPCOES.map((mes) => (
+                <MenuItem key={mes.value} value={mes.value}>
+                  {mes.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <FormControl size="small" sx={{ minWidth: 96 }}>
+            <InputLabel id="imh-med-filtro-ano-label">Ano</InputLabel>
+            <Select
+              labelId="imh-med-filtro-ano-label"
+              label="Ano"
+              value={filtroAno}
+              onChange={(e) => handleFiltroAnoChange(Number(e.target.value))}
+            >
+              {anosOptions.map((ano) => (
+                <MenuItem key={ano} value={ano}>
+                  {ano}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
+      </Box>
+
+      {loteSemDefinir && loteAviso ? (
+        <Alert
+          severity="warning"
+          variant="filled"
+          sx={{ fontWeight: 800, letterSpacing: 0.3 }}
+          onClose={() => {
+            setLoteSemDefinir(false)
+            setLoteAviso(null)
+          }}
+        >
+          {loteAviso}
+        </Alert>
+      ) : null}
+      {nipNaoCadastrado ? (
+        <Alert
+          severity="warning"
+          variant="filled"
+          sx={{ fontWeight: 800, letterSpacing: 0.3 }}
+          onClose={() => setNipNaoCadastrado(false)}
+        >
+          {NIP_NAO_ENCONTRADO}
+        </Alert>
+      ) : null}
+
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".xlsx,.ods,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.oasis.opendocument.spreadsheet"
+        hidden
+        onChange={handleImportFileChange}
+      />
+      <ImhMedicamentoPlanilhaPreview
+        value={valueFiltrado}
+        editingLinhaId={editingLinhaId}
+        importing={importing}
+        isEnviando={isEnviando}
+        mesReferencia={mesReferenciaLabel}
+        emptyHint={emptyHint}
+        selectedImhIds={selectedImhIds}
+        onSelectedImhIdsChange={setSelectedImhIds}
+        onRevertFinalizadoIds={(ids) => {
+          const remove = new Set(ids)
+          onChange({
+            ...value,
+            finalizedImhIds: (value.finalizedImhIds ?? []).filter((id) => !remove.has(id)),
+          })
+        }}
+        onImportClick={handleImportClick}
+        onEnviarImh={handleEnviarImh}
+        onEditLinha={handleEditLinha}
+        onDeleteLinha={handleDeleteLinha}
+        listaMedicamentos={listaMedicamentos}
+        todasLinhasImh={value.linhas}
+        filtroMes={filtroMes}
+        filtroAno={filtroAno}
+        onExpandedChange={setSheetExpanded}
+      />
+      <PlanilhaLinhaEditDialog
+          open={Boolean(editingLinhaId) || isAdding}
+          title={isAdding ? 'Novo lançamento IMH' : 'Editar IMH medicamento'}
+          badge="PME"
+          onClose={handleCancelLinha}
+          onSave={handleAdicionarLinha}
+          saveLabel={isAdding ? 'Adicionar lançamento' : 'Salvar lançamento'}
+          anchorLinhaId={editingLinhaId}
+        >
+          <Box ref={linhaFormRef} sx={{ display: 'grid', gap: 1.25 }}>
+            <PlanilhaEditSection title="Lançamento" columns={2}>
+
+          <Box
+            sx={{
+              mt: 0.5,
+              display: 'grid',
+              gap: 0.85,
+              gridTemplateColumns: { xs: '1fr', sm: '1fr 1fr' },
+            }}
+          >
+            <TextField
+              label="DATA"
+              value={linhaDraft.data}
+              onChange={(e) => {
+                const data = formatImhMedData(e.target.value)
+                if (data.trim()) setDataError(false)
+                updateDraft({ data })
+              }}
+              placeholder="dd/mm/aa"
+              size="small"
+              required
+              error={dataError}
+              helperText={dataError ? 'Campo obrigatório' : undefined}
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="NIP"
+              value={linhaDraft.nip}
+              onChange={(e) => {
+                const nip = formatImhMedNip(e.target.value)
+                updateDraft({ nip })
+                if (normalizePacienteNipKey(nip).length >= 8) {
+                  tryFillFromNip(nip, { alertIfMissing: true })
+                }
+              }}
+              onBlur={(e) =>
+                tryFillFromNip(formatImhMedNip(e.target.value), { alertIfMissing: true })
+              }
+              placeholder="00.0000.00"
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <Autocomplete
+              options={pacientes}
+              value={selectedPacienteNome}
+              inputValue={nomeInput}
+              onInputChange={(_, next, reason) => {
+                setNomeInput(next)
+                if (reason === 'input' || reason === 'clear') {
+                  updateDraft({ nome: formatImhMedUppercase(next) })
+                }
+              }}
+              onChange={(_, option) => {
+                if (typeof option === 'string') {
+                  const nome = formatImhMedUppercase(option)
+                  updateDraft({ nome })
+                  setNomeInput(nome)
+                  tryFillFromNome(nome)
+                  return
+                }
+                if (option) applyPacienteSelection(option)
+              }}
+              getOptionLabel={(option) =>
+                typeof option === 'string' ? option : option.nome
+              }
+              isOptionEqualToValue={(a, b) => {
+                if (typeof a === 'string' || typeof b === 'string') {
+                  return (
+                    formatPacientePmeUpper(typeof a === 'string' ? a : a.nome) ===
+                    formatPacientePmeUpper(typeof b === 'string' ? b : b.nome)
+                  )
+                }
+                return a.id === b.id
+              }}
+              filterOptions={(options, state) =>
+                searchPacientesPmeByNome(state.inputValue, options, 40)
+              }
+              freeSolo
+              onBlur={() => tryFillFromNome(nomeInput || linhaDraft.nome)}
+              renderOption={(props, option) => (
+                <li {...props} key={option.id}>
+                  <Box sx={{ py: 0.25 }}>
+                    <Typography variant="body2">{option.nome}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      NIP {option.nipUsuario}
+                      {option.postoGradTitular ? ` · ${option.postoGradTitular}` : ''}
+                      {option.vinculo ? ` · ${option.vinculo}` : ''}
+                    </Typography>
+                  </Box>
+                </li>
+              )}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="NOME"
+                  size="small"
+                  fullWidth
+                  placeholder="Busque o paciente pelo nome"
+                  sx={planilhaEditFieldSx}
+                />
+              )}
+              noOptionsText="Nenhum paciente na planilha Pacientes"
+              slotProps={planilhaEditAutocompleteSlotProps}
+              sx={{ gridColumn: { sm: '1 / -1' } }}
+            />
+            <Autocomplete
+              options={medicamentoOptions}
+              value={selectedMedicamento}
+              inputValue={itemPmeInput}
+              onInputChange={(_, next, reason) => {
+                if (reason === 'input' || reason === 'clear') {
+                  setItemPmeInput(next)
+                  if (!next.trim()) {
+                    updateDraft({
+                      itemPme: '',
+                      lote: '',
+                      validade: '',
+                      listaMedicamentoId: undefined,
+                    })
+                    setLoteSemDefinir(false)
+                    setLoteAviso(null)
+                  }
+                }
+              }}
+              onChange={(_, option) => {
+                applyMedicamentoSelection(option)
+              }}
+              getOptionLabel={(option) =>
+                typeof option === 'string' ? option : option.medicamento
+              }
+              isOptionEqualToValue={(a, b) => a.id === b.id}
+              filterOptions={(options, state) => {
+                const q = state.inputValue.trim().toLowerCase()
+                // Select aparece a partir da primeira letra digitada.
+                if (!q) return []
+                const startsWith = options.filter((opt) =>
+                  opt.medicamento.toLowerCase().startsWith(q),
+                )
+                const includes = options.filter((opt) => {
+                  const nome = opt.medicamento.toLowerCase()
+                  if (nome.startsWith(q)) return false
+                  return (
+                    nome.includes(q) ||
+                    opt.neb.toLowerCase().includes(q) ||
+                    opt.lote.toLowerCase().includes(q)
+                  )
+                })
+                return [...startsWith, ...includes].slice(0, 40)
+              }}
+              autoHighlight
+              openOnFocus={false}
+              selectOnFocus
+              clearOnBlur={false}
+              handleHomeEndKeys
+              renderOption={(props, option) => (
+                <li {...props} key={option.id}>
+                  <Box sx={{ py: 0.25 }}>
+                    <Typography variant="body2">{option.medicamento}</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {[
+                        option.lote.trim() ? `Lote ${option.lote.trim()}` : null,
+                        option.validade.trim() ? `Val. ${option.validade.trim()}` : null,
+                        option.qtd.trim() ? `QTD ${option.qtd.trim()}` : null,
+                        option.neb.trim() || null,
+                        option.uf.trim() || null,
+                        option.precoReferencia.trim()
+                          ? formatPrecoReferenciaMedicamento(option.precoReferencia)
+                          : null,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Typography>
+                  </Box>
+                </li>
+              )}
+              renderInput={(params) => (
+                <TextField
+                  {...params}
+                  label="ITEM (PME) — DESCRIÇÃO DO MEDICAMENTO"
+                  size="small"
+                  fullWidth
+                  placeholder="Digite a 1ª letra para buscar na Lista de Medicamentos"
+                  helperText={
+                    medicamentoOptions.length === 0
+                      ? 'Cadastre medicamentos na aba Planilhas → Lista de Medicamentos'
+                      : undefined
+                  }
+                  sx={multilineFieldSx}
+                />
+              )}
+              noOptionsText={
+                itemPmeInput.trim()
+                  ? 'Nenhum medicamento correspondente na Lista de Medicamentos'
+                  : 'Digite para buscar na Lista de Medicamentos'
+              }
+              slotProps={planilhaEditAutocompleteSlotProps}
+              sx={{ gridColumn: '1 / -1' }}
+            />
+            <TextField
+              label="LOTE"
+              value={linhaDraft.lote}
+              onChange={(e) => {
+                const lote = formatImhMedUppercase(e.target.value)
+                updateDraft({ lote })
+                if (lote.trim()) {
+                  setLoteSemDefinir(false)
+                  setLoteAviso(null)
+                }
+              }}
+              size="small"
+              fullWidth
+              error={loteSemDefinir}
+              sx={{
+                ...compactFieldSx,
+                ...(loteSemDefinir
+                  ? {
+                      '@keyframes loteCampoBlink': {
+                        '0%, 100%': { backgroundColor: '#fff' },
+                        '50%': { backgroundColor: '#ffcdd2' },
+                      },
+                      '& .MuiInputBase-root': {
+                        fontSize: '0.78rem',
+                        animation: 'loteCampoBlink 0.85s ease-in-out infinite',
+                      },
+                    }
+                  : null),
+              }}
+            />
+            <TextField
+              label="VALIDADE"
+              value={linhaDraft.validade}
+              onChange={(e) => updateDraft({ validade: formatImhMedData(e.target.value) })}
+              placeholder="dd/mm/aaaa"
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="QTD"
+              value={linhaDraft.qtd}
+              onChange={(e) => updateDraft({ qtd: formatImhMedQtd(e.target.value) })}
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="VALOR UNITÁRIO"
+              value={linhaDraft.valorUnitario}
+              onChange={(e) => updateDraft({ valorUnitario: formatImhMedMoeda(e.target.value) })}
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="TOTAL"
+              value={linhaDraft.total}
+              size="small"
+              fullWidth
+              slotProps={{ input: { readOnly: true } }}
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="NIP TITULAR"
+              value={linhaDraft.nipTitular}
+              onChange={(e) => updateDraft({ nipTitular: formatImhMedNip(e.target.value) })}
+              placeholder="00.0000.00"
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="POSTO/GRAD"
+              value={linhaDraft.postoGrad}
+              onChange={(e) => updateDraft({ postoGrad: formatImhMedUppercase(e.target.value) })}
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              select
+              label="VINCULO"
+              value={linhaDraft.vinculo || ''}
+              onChange={(e) => updateDraft({ vinculo: formatImhMedUppercase(e.target.value) })}
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            >
+              <MenuItem value="">—</MenuItem>
+              {vinculoOptions.map((item) => (
+                <MenuItem key={item} value={item}>
+                  {item}
+                </MenuItem>
+              ))}
+            </TextField>
+            <TextField
+              label="% A INDENIZAR"
+              value={linhaDraft.pctIndenizar}
+              onChange={(e) => updateDraft({ pctIndenizar: e.target.value })}
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="VALOR A INDENIZAR"
+              value={linhaDraft.valorIndenizar}
+              size="small"
+              fullWidth
+              slotProps={{ input: { readOnly: true } }}
+              sx={planilhaEditFieldSx}
+            />
+            <TextField
+              label="UNIDADE DE FORNECIMENTO"
+              value={linhaDraft.unidadeFornecimento}
+              onChange={(e) =>
+                updateDraft({ unidadeFornecimento: formatImhMedUppercase(e.target.value) })
+              }
+              size="small"
+              fullWidth
+              sx={planilhaEditFieldSx}
+            />
+          </Box>
+            </PlanilhaEditSection>
+          </Box>
+        </PlanilhaLinhaEditDialog>
+
+        <ConmedEscolherAbaModal
+          open={sheetPicker.open}
+          sheetNames={sheetPicker.sheets.map((s) => s.nome)}
+          fileName={sheetPicker.fileName}
+          initialSheetIndex={sheetPicker.initialSheetIndex}
+          description={
+            sheetPicker.fileName
+              ? `O arquivo “${sheetPicker.fileName}” tem várias abas. Escolha qual aba deseja importar.`
+              : 'O arquivo tem várias abas. Escolha qual aba deseja importar.'
+          }
+          onCancel={() =>
+            setSheetPicker({ open: false, fileName: '', sheets: [], initialSheetIndex: 0 })
+          }
+          onConfirm={handleConfirmSheet}
+        />
+        <MedicamentoAbasExplicacaoModal
+          open={explicacaoOpen}
+          onClose={() => setExplicacaoOpen(false)}
+        />
+        <ImhDataObrigatoriaModal
+          open={dataAvisoOpen}
+          onClose={() => setDataAvisoOpen(false)}
+        />
+        <ImhEstoqueInsuficienteModal
+          open={estoqueInsuficiente.open}
+          medicamento={estoqueInsuficiente.medicamento}
+          lote={estoqueInsuficiente.lote}
+          estoqueAtual={estoqueInsuficiente.estoqueAtual}
+          qtdBaixa={estoqueInsuficiente.qtdBaixa}
+          estoqueApos={estoqueInsuficiente.estoqueApos}
+          onCancel={handleCancelarEstoqueInsuficiente}
+          onConfirm={handleConfirmarEstoqueInsuficiente}
+        />
+        <Snackbar
+          open={importFeedback.open}
+          autoHideDuration={5000}
+          onClose={() => setImportFeedback((prev) => ({ ...prev, open: false }))}
+          anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        >
+          <Alert
+            severity={importFeedback.severity}
+            variant="filled"
+            onClose={() => setImportFeedback((prev) => ({ ...prev, open: false }))}
+          >
+            {importFeedback.message}
+          </Alert>
+        </Snackbar>
+
+    </Box>
+  )
+}
+
+function ImhDataObrigatoriaModal({
+  open,
+  onClose,
+}: {
+  open: boolean
+  onClose: () => void
+}) {
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontWeight: 700 }}>Data obrigatória</DialogTitle>
+      <DialogContent>
+        <Typography variant="body2" color="text.secondary">
+          Preencha o campo DATA para adicionar ou salvar o lançamento no Modelo IHM — PME.
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: 2.5, pb: 2 }}>
+        <Button variant="contained" onClick={onClose} sx={{ textTransform: 'none' }}>
+          Entendi
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}
+
+function formatEstoqueNumero(n: number): string {
+  return Number.isInteger(n) ? String(n) : String(n).replace('.', ',')
+}
+
+function ImhEstoqueInsuficienteModal({
+  open,
+  medicamento,
+  lote,
+  estoqueAtual,
+  qtdBaixa,
+  estoqueApos,
+  onCancel,
+  onConfirm,
+}: {
+  open: boolean
+  medicamento: string
+  lote: string
+  estoqueAtual: number
+  qtdBaixa: number
+  estoqueApos: number
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <Dialog open={open} onClose={onCancel} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontWeight: 700 }}>Estoque insuficiente</DialogTitle>
+      <DialogContent sx={{ display: 'grid', gap: 1.25 }}>
+        <Typography variant="body2" color="text.secondary">
+          A quantidade lançada é maior que o estoque disponível. O medicamento será incluído na
+          planilha IMH e o estoque ficará negativo.
+        </Typography>
+        <Box>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+            {medicamento || '—'}
+          </Typography>
+          {lote ? (
+            <Typography variant="body2" color="text.secondary">
+              Lote {lote}
+            </Typography>
+          ) : null}
+        </Box>
+        <Typography variant="body2">
+          Estoque: {formatEstoqueNumero(estoqueAtual)} · Lançado:{' '}
+          {formatEstoqueNumero(qtdBaixa)} · Após: {formatEstoqueNumero(estoqueApos)}
+        </Typography>
+      </DialogContent>
+      <DialogActions sx={{ px: 2.5, pb: 2 }}>
+        <Button onClick={onCancel} sx={{ textTransform: 'none' }}>
+          Cancelar
+        </Button>
+        <Button variant="contained" color="error" onClick={onConfirm} sx={{ textTransform: 'none' }}>
+          Continuar mesmo assim
+        </Button>
+      </DialogActions>
+    </Dialog>
+  )
+}

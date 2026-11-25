@@ -1,0 +1,615 @@
+import seedData from '@/data/consumoMaterialSeed.json'
+import type { ConsumoPlanilhaClinicaState, Pedido, PedidoPlanilhaEnvioState, ProcessoArquivado } from '@/types'
+import {
+  calcValorIndenizar,
+  formatValorBrasileiro,
+  parseValorBrasileiro,
+  type ConsumoMaterialRow,
+} from '@/utils/consumoMaterialOds'
+import {
+  formatPrecoReferenciaMedicamento,
+  getMedicamentosPrecosCatalog,
+} from '@/utils/medicamentosPrecos'
+
+export interface MesConsumoModelo {
+  id: string
+  label: string
+  mes: number
+  ano: number
+  arquivo: string
+}
+
+export const CONSUMO_MESES_MODELO: MesConsumoModelo[] = [
+  { id: '01-26', label: 'Janeiro/2026', mes: 1, ano: 2026, arquivo: '01-26 - JANEIRO - DEFINITIVA.ods' },
+  { id: '02-26', label: 'Fevereiro/2026', mes: 2, ano: 2026, arquivo: '02-26 - FEVEREIRO - DEFINITIVA.ods' },
+  { id: '03-26', label: 'Março/2026', mes: 3, ano: 2026, arquivo: '03-26 - MARÇO - DEFINITIVA.ods' },
+  { id: '04-26', label: 'Abril/2026', mes: 4, ano: 2026, arquivo: '04-26 - ABRIL - DEFINITIVA.ods' },
+  { id: '05-26', label: 'Maio/2026', mes: 5, ano: 2026, arquivo: '05-26 - MAIO - DEFINITIVA.ods' },
+  { id: '06-26', label: 'Junho/2026', mes: 6, ano: 2026, arquivo: '06-26 - JUNHO - DEFINITIVA.ods' },
+]
+
+export function createLinhaVazia(id: string, numero: string): ConsumoMaterialRow {
+  return {
+    id,
+    numero,
+    postoGrad: '',
+    nip: '',
+    nome: '',
+    iniciais: '',
+    data: '',
+    idade: '',
+    diagnostico: '',
+    cid: '',
+    procedimento: '',
+    materiais: '',
+    et: '',
+    fornecedor: '',
+    cirurgiao: '',
+    mapaSala: '',
+    mapa: '',
+    ref: '',
+    safin: '',
+    empenho: '',
+    danfe: '',
+    valor: '',
+    valorNumerico: 0,
+    ata: '',
+    itemPme: '',
+    qtd: '',
+    valorUnitario: '',
+    nipTitular: '',
+    vinculo: '',
+    pctIndenizar: '',
+    om: '',
+    unidadeFornecimento: '',
+    quantidadeAdquirida: '',
+    maneiraDispensacao: '',
+    valorIndenizar: '',
+    qtdFornecidaOse: '',
+    maneiraFornecimento: '',
+  }
+}
+
+function normalizeConsumoSeedRow(row: ConsumoMaterialRow): ConsumoMaterialRow {
+  return {
+    ...createLinhaVazia(row.id, row.numero),
+    ...row,
+    itemPme: row.itemPme ?? row.materiais ?? '',
+    qtd: row.qtd ?? (row.valorNumerico > 0 ? '1' : ''),
+    valorUnitario:
+      row.valorUnitario ??
+      (row.valorNumerico > 0 ? formatValorBrasileiro(row.valorNumerico) : ''),
+    nipTitular: row.nipTitular ?? row.nip ?? '',
+    vinculo: row.vinculo ?? '',
+    pctIndenizar: row.pctIndenizar ?? '',
+    om: row.om ?? '',
+    unidadeFornecimento: row.unidadeFornecimento ?? '',
+    quantidadeAdquirida: row.quantidadeAdquirida ?? '',
+    maneiraDispensacao: row.maneiraDispensacao ?? row.maneiraFornecimento ?? '',
+    valorIndenizar: row.valorIndenizar ?? '',
+    qtdFornecidaOse: row.qtdFornecidaOse ?? '',
+    maneiraFornecimento: row.maneiraFornecimento ?? row.maneiraDispensacao ?? '',
+  }
+}
+
+export const CONSUMO_MATERIAL_SEED: ConsumoMaterialRow[] = (
+  seedData as ConsumoMaterialRow[]
+).map(normalizeConsumoSeedRow)
+
+export const CONSUMO_PLANILHA_NOME_PADRAO = 'Modelos OPME TRO — Jan-Jun/2026'
+
+export const CLINICA_CONSUMO_OPME_ID = 'clinica-opme-tro'
+export const CLINICA_CONSUMO_OPME_NOME = 'OPME TRO'
+
+export const TOTAL_LANCAMENTOS_MODELO = CONSUMO_MATERIAL_SEED.length
+
+export function getConsumoMaterialInicial(): ConsumoMaterialRow[] {
+  return CONSUMO_MATERIAL_SEED.map((row) => ({ ...row }))
+}
+
+/**
+ * Linhas fixas do Modelo IHM — PME para o modo exemplo (medicamento).
+ * Montadas a partir da lista de Preço de Medicamentos (conteúdo de demonstração).
+ */
+export function getConsumoMaterialDemoMedicamento(): ConsumoMaterialRow[] {
+  const catalog = getMedicamentosPrecosCatalog().slice(0, 10)
+  const datas = [
+    '03/01/26',
+    '05/01/26',
+    '08/01/26',
+    '10/01/26',
+    '12/01/26',
+    '15/01/26',
+    '18/01/26',
+    '20/01/26',
+    '22/01/26',
+    '25/01/26',
+  ]
+  const pacientes = [
+    { nip: '24.1118.21', nome: 'LUIZ PHILIPE SANTANA SILVA', postoGrad: 'MN', vinculo: 'TITULAR' },
+    { nip: '12.3456.78', nome: 'ANA BEATRIZ COSTA LIMA', postoGrad: 'CB', vinculo: 'DEPENDENTE' },
+    { nip: '98.7654.32', nome: 'CARLOS EDUARDO NUNES', postoGrad: '1T', vinculo: 'TITULAR' },
+    { nip: '11.2233.44', nome: 'MARIA FERNANDA ALVES', postoGrad: 'SG', vinculo: 'DEPENDENTE' },
+    { nip: '55.6677.88', nome: 'JOÃO PEDRO MARTINS', postoGrad: 'MN', vinculo: 'TITULAR' },
+    { nip: '33.4455.66', nome: 'PATRICIA HELENA SOUZA', postoGrad: 'CF', vinculo: 'TITULAR' },
+    { nip: '77.8899.00', nome: 'ROBERTO SILVA FREITAS', postoGrad: '2T', vinculo: 'TITULAR' },
+    { nip: '22.3344.55', nome: 'CAMILA RODRIGUES MELO', postoGrad: 'CB', vinculo: 'DEPENDENTE' },
+    { nip: '66.7788.99', nome: 'FELIPE AUGUSTO DIAS', postoGrad: 'MN', vinculo: 'TITULAR' },
+    { nip: '44.5566.77', nome: 'JULIANA CASTRO REIS', postoGrad: 'SG', vinculo: 'DEPENDENTE' },
+  ]
+
+  return catalog.map((med, index) => {
+    const paciente = pacientes[index] ?? pacientes[0]
+    const qtd = index % 3 === 0 ? 2 : 1
+    const unitario = formatPrecoReferenciaMedicamento(med.precoReferencia)
+    const unitValue = parseValorBrasileiro(unitario)
+    const total = unitValue * qtd
+    return {
+      ...createLinhaVazia(`demo-med-pme-${index + 1}`, String(index + 1)),
+      data: datas[index] ?? '03/01/26',
+      nip: paciente.nip,
+      nome: paciente.nome,
+      itemPme: med.medicamento,
+      materiais: med.medicamento,
+      qtd: String(qtd),
+      valorUnitario: unitario,
+      valor: total > 0 ? formatValorBrasileiro(total) : unitario,
+      valorNumerico: total,
+      nipTitular: paciente.nip,
+      postoGrad: paciente.postoGrad,
+      vinculo: paciente.vinculo,
+      pctIndenizar: paciente.vinculo === 'TITULAR' ? '100%' : '50%',
+      om: 'HNMD',
+      unidadeFornecimento: med.uf,
+      quantidadeAdquirida: String(100 + index * 10),
+      maneiraDispensacao: index % 2 === 0 ? 'PELA OMH' : 'POR OSE',
+      valorIndenizar:
+        paciente.vinculo === 'TITULAR'
+          ? total > 0
+            ? formatValorBrasileiro(total)
+            : unitario
+          : total > 0
+            ? formatValorBrasileiro(total * 0.5)
+            : '',
+      qtdFornecidaOse: index % 2 === 0 ? '' : String(qtd),
+      maneiraFornecimento: index % 2 === 0 ? 'PELA OMH' : 'POR OSE',
+    }
+  })
+}
+
+/** Estado inicial da planilha de consumo para a clínica de demonstração. */
+export function createDemoPlanilhaExemploState(): ConsumoPlanilhaClinicaState {
+  return {
+    finalizedRowIds: [],
+    finalizedAuditoriaRowIds: [],
+    finalizedMaterialRowIds: [],
+    extraRows: getConsumoMaterialInicial(),
+  }
+}
+
+/** Estado inicial da planilha de consumo para o medicamento de demonstração. */
+export function createDemoMedicamentoPlanilhaExemploState(): ConsumoPlanilhaClinicaState {
+  return {
+    finalizedRowIds: [],
+    finalizedAuditoriaRowIds: [],
+    finalizedMaterialRowIds: [],
+    extraRows: getConsumoMaterialDemoMedicamento(),
+  }
+}
+
+export function rowIdFromPedidoId(pedidoId: string): string {
+  return pedidoId.startsWith('pedido-') ? pedidoId.slice('pedido-'.length) : pedidoId
+}
+
+export function pedidoIdFromRowId(rowId: string): string {
+  return `pedido-${rowId}`
+}
+
+export function createPedidoLoteId(): string {
+  return `pedido-lote-${Date.now()}`
+}
+
+export function isPedidoLote(pedidoId: string): boolean {
+  return pedidoId.startsWith('pedido-lote-')
+}
+
+function formatDataIsoParaPlanilha(iso: string): string {
+  const match = iso.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  if (!match) return ''
+  const [, year, month, day] = match
+  return `${day}/${month}/${year.slice(-2)}`
+}
+
+function parseDescricaoCirurgica(descricao: string): { diagnostico: string; cid: string } {
+  const match = descricao.match(/ — CID (.+)$/)
+  if (match) {
+    return {
+      diagnostico: descricao.replace(/ — CID .+$/, '').trim(),
+      cid: match[1].trim(),
+    }
+  }
+  return { diagnostico: descricao.trim(), cid: '' }
+}
+
+function buildRowFromPedido(pedido: Pedido): ConsumoMaterialRow {
+  const paciente = pedido.paciente
+  const dados = pedido.dadosClinica
+  const { diagnostico, cid } = parseDescricaoCirurgica(dados?.descricaoCirurgica ?? '')
+  const folhaParts = (dados?.folhaSala ?? '').split(' / ')
+  const mapaSala = folhaParts[0]?.trim() ?? ''
+  const mapa = folhaParts.slice(1).join(' / ').trim()
+  const etiquetaParts = (dados?.etiquetas ?? '').split(' | ').map((p) => p.trim())
+  const valorNumerico = dados?.valorTotal ?? pedido.valor ?? 0
+  const numeroMatch = pedido.numero.match(/(\d+)\s*$/)
+
+  return {
+    id: rowIdFromPedidoId(pedido.id),
+    numero: numeroMatch ? String(parseInt(numeroMatch[1], 10)) : '',
+    postoGrad: '',
+    nip: paciente?.nip ?? '',
+    nome: paciente?.nome ?? '',
+    iniciais: '',
+    data: dados?.dataCirurgia ? formatDataIsoParaPlanilha(dados.dataCirurgia) : '',
+    idade: '',
+    diagnostico,
+    cid,
+    procedimento: dados?.procedimento ?? '',
+    materiais: dados?.materialUtilizado ?? '',
+    et: etiquetaParts[0] ?? '',
+    fornecedor: dados?.empresaConsignada ?? '',
+    cirurgiao: dados?.medico ?? '',
+    mapaSala,
+    mapa,
+    ref: dados?.pregao?.split(' ')[0] ?? '',
+    safin: dados?.pregao?.includes(' ') ? dados.pregao.split(' ').slice(1).join(' ') : '',
+    empenho: etiquetaParts[2] ?? '',
+    danfe: etiquetaParts[1] ?? '',
+    valor: valorNumerico > 0 ? formatValorBrasileiro(valorNumerico) : '',
+    valorNumerico,
+    ata: etiquetaParts[3] ?? '',
+    itemPme: dados?.materialUtilizado ?? '',
+    qtd: dados?.quantidade ? String(dados.quantidade) : valorNumerico > 0 ? '1' : '',
+    valorUnitario:
+      dados?.valorUnitario && dados.valorUnitario > 0
+        ? formatValorBrasileiro(dados.valorUnitario)
+        : valorNumerico > 0
+          ? formatValorBrasileiro(valorNumerico)
+          : '',
+    nipTitular: paciente?.nipTitular ?? paciente?.nip ?? '',
+    vinculo: paciente?.vinculo ?? '',
+    pctIndenizar: '',
+    om: '',
+    unidadeFornecimento: '',
+    quantidadeAdquirida: '',
+    maneiraDispensacao: '',
+    valorIndenizar: '',
+    qtdFornecidaOse: '',
+    maneiraFornecimento: '',
+  }
+}
+
+export function pedidoToConsumoRow(pedido: Pedido): ConsumoMaterialRow {
+  if (pedido.id.startsWith('pedido-')) {
+    const rowId = rowIdFromPedidoId(pedido.id)
+    const seed = CONSUMO_MATERIAL_SEED.find((r) => r.id === rowId)
+    if (seed) return { ...seed }
+  }
+  return buildRowFromPedido(pedido)
+}
+
+/** Monta a planilha a partir dos pedidos do sistema + rascunhos ainda não enviados */
+export function buildPlanilhaLancamentos(
+  pedidos: Pedido[],
+  extraRows: ConsumoMaterialRow[] = [],
+  deletedRowIds: ReadonlySet<string> = new Set(),
+): ConsumoMaterialRow[] {
+  const pedidoIds = new Set(pedidos.map((p) => p.id))
+  const overrideMap = new Map<string, ConsumoMaterialRow>()
+
+  for (const row of extraRows) {
+    if (!isLinhaPreenchida(row)) continue
+    const pedidoId = pedidoIdFromRowId(row.id)
+    if (pedidoIds.has(pedidoId)) {
+      overrideMap.set(row.id, row)
+    }
+  }
+
+  const fromPedidos = pedidos
+    .filter((p) => !p.consumoRowIds?.length)
+    .map(pedidoToConsumoRow)
+    .filter((r) => !deletedRowIds.has(r.id))
+    .map((r) => overrideMap.get(r.id) ?? r)
+
+  const extras = extraRows.filter((row) => {
+    if (!isLinhaPreenchida(row)) return false
+    return !pedidoIds.has(pedidoIdFromRowId(row.id))
+  })
+
+  return [...fromPedidos, ...extras]
+}
+
+export function pedidoPlanilhaArquivada(
+  pedidoId: string,
+  planilhaEnvio?: Record<string, PedidoPlanilhaEnvioState>,
+  processosArquivados?: ProcessoArquivado[],
+): boolean {
+  if (planilhaEnvio?.[pedidoId]?.arquivadaEm) return true
+  return Boolean(
+    processosArquivados?.some(
+      (item) => item.pedidoId === pedidoId && item.etapaChave === 'DIV_MAT_CONTABILIDADE_IMH',
+    ),
+  )
+}
+
+export function getRowIdsComPedido(
+  pedidos: Pedido[],
+  planilhaEnvio?: Record<string, PedidoPlanilhaEnvioState>,
+  processosArquivados?: ProcessoArquivado[],
+): Set<string> {
+  const ids = new Set<string>()
+  for (const pedido of pedidos) {
+    if (pedido.planilhaDevolvidaParaChave === 'SOLICITACAO') continue
+    if (pedidoPlanilhaArquivada(pedido.id, planilhaEnvio, processosArquivados)) continue
+
+    if (pedido.consumoRowIds?.length) {
+      for (const rowId of pedido.consumoRowIds) ids.add(rowId)
+    } else if (!isPedidoLote(pedido.id)) {
+      ids.add(rowIdFromPedidoId(pedido.id))
+    }
+  }
+  return ids
+}
+
+export function sameConsumoRowSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const setA = new Set(a)
+  return b.every((id) => setA.has(id))
+}
+
+/** Localiza pedido ativo da clínica com exatamente as mesmas linhas da planilha. */
+export function findPedidoParaMesmasLinhas(
+  pedidos: Pedido[],
+  rowIds: string[],
+  clinicaId: string,
+): Pedido | null {
+  if (rowIds.length === 0) return null
+  for (const pedido of pedidos) {
+    if (pedido.clinicaId !== clinicaId || pedido.concluido) continue
+    if (!pedido.consumoRowIds?.length) continue
+    if (sameConsumoRowSet(pedido.consumoRowIds, rowIds)) {
+      return pedido
+    }
+  }
+  return null
+}
+
+/** Linhas vazias fixas ao final da planilha para novos lançamentos */
+export const SLOTS_NOVOS_LANCAMENTOS = 15
+
+export function getMesAtualModelo(): MesConsumoModelo {
+  const now = new Date()
+  const found = CONSUMO_MESES_MODELO.find(
+    (m) => m.mes === now.getMonth() + 1 && m.ano === now.getFullYear(),
+  )
+  return found ?? CONSUMO_MESES_MODELO[0]
+}
+
+const MESES_NOMES = [
+  'Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho',
+  'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro',
+]
+
+export const ANOS_PLANILHA_DISPONIVEIS = [2025, 2026, 2027]
+
+export function getMesModeloFromParts(mes: number, ano: number): MesConsumoModelo {
+  const found = CONSUMO_MESES_MODELO.find((m) => m.mes === mes && m.ano === ano)
+  if (found) return found
+  const anoCurto = String(ano).slice(-2)
+  return {
+    id: `${String(mes).padStart(2, '0')}-${anoCurto}`,
+    label: `${MESES_NOMES[mes - 1]}/${ano}`,
+    mes,
+    ano,
+    arquivo: '',
+  }
+}
+
+export function dataPertenceAoMes(data: string, mesModelo: MesConsumoModelo): boolean {
+  const match = data.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/)
+  if (!match) return false
+  const [, , monthStr, yearStr] = match
+  const month = parseInt(monthStr, 10)
+  const year = yearStr.length === 2 ? 2000 + parseInt(yearStr, 10) : parseInt(yearStr, 10)
+  return month === mesModelo.mes && year === mesModelo.ano
+}
+
+export function isLinhaPreenchida(row: ConsumoMaterialRow): boolean {
+  return Boolean(row.nip.trim())
+}
+
+export function isLinhaPlaceholder(row: ConsumoMaterialRow): boolean {
+  return row.id.startsWith('slot-') && !isLinhaPreenchida(row)
+}
+
+export function rowPodeSerSelecionada(row: ConsumoMaterialRow): boolean {
+  return isLinhaPreenchida(row)
+}
+
+export function rowPodeSerEnviadaAuditoria(
+  row: ConsumoMaterialRow,
+  rowIdsComPedido: Set<string>,
+  finalizedAuditoriaRowIds?: Set<string>,
+): boolean {
+  return (
+    isLinhaPreenchida(row) &&
+    !rowIdsComPedido.has(row.id) &&
+    !finalizedAuditoriaRowIds?.has(row.id)
+  )
+}
+
+export function rowPodeSerEnviadaMaterial(
+  row: ConsumoMaterialRow,
+  finalizedMaterialRowIds?: Set<string>,
+): boolean {
+  return isLinhaPreenchida(row) && !finalizedMaterialRowIds?.has(row.id)
+}
+
+/** @deprecated Use rowPodeSerEnviadaAuditoria */
+export function rowPodeSerEnviada(
+  row: ConsumoMaterialRow,
+  rowIdsComPedido: Set<string>,
+  finalizedRowIds?: Set<string>,
+): boolean {
+  return rowPodeSerEnviadaAuditoria(row, rowIdsComPedido, finalizedRowIds)
+}
+
+export function montarLinhasPlanilhaFixa(
+  lancamentos: ConsumoMaterialRow[],
+  mesModelo: MesConsumoModelo,
+): ConsumoMaterialRow[] {
+  const preenchidas = lancamentos.filter(
+    (r) => isLinhaPreenchida(r) && dataPertenceAoMes(r.data, mesModelo),
+  )
+  const slots = Array.from({ length: SLOTS_NOVOS_LANCAMENTOS }, (_, i) =>
+    createLinhaVazia(`slot-${mesModelo.id}-${i}`, String(preenchidas.length + i + 1)),
+  )
+  return [...preenchidas, ...slots]
+}
+
+export type InserirLinhaConsumoPosicao = 'above' | 'below'
+
+export type ConsumoMaterialColunaKey = Exclude<
+  keyof ConsumoMaterialRow,
+  'id' | 'valorNumerico'
+>
+
+export function filterLinhasDoMes(
+  lancamentos: ConsumoMaterialRow[],
+  mes: MesConsumoModelo,
+): ConsumoMaterialRow[] {
+  return lancamentos.filter(
+    (r) => isLinhaPreenchida(r) && dataPertenceAoMes(r.data, mes),
+  )
+}
+
+export function createNovaLinhaConsumo(mes: MesConsumoModelo, numero: string): ConsumoMaterialRow {
+  const id = `draft-${mes.id}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  return createLinhaVazia(id, numero)
+}
+
+export function renumerarLinhasConsumo(rows: ConsumoMaterialRow[]): ConsumoMaterialRow[] {
+  return rows.map((row, index) => ({ ...row, numero: String(index + 1) }))
+}
+
+export function inicializarLinhasDoMes(
+  lancamentos: ConsumoMaterialRow[],
+  mes: MesConsumoModelo,
+): ConsumoMaterialRow[] {
+  const preenchidas = filterLinhasDoMes(lancamentos, mes)
+  if (preenchidas.length === 0) {
+    return [createNovaLinhaConsumo(mes, '1')]
+  }
+  return renumerarLinhasConsumo(preenchidas.map((row) => ({ ...row })))
+}
+
+export function inserirLinhaConsumo(
+  rows: ConsumoMaterialRow[],
+  targetId: string,
+  position: InserirLinhaConsumoPosicao,
+  mes: MesConsumoModelo,
+): ConsumoMaterialRow[] {
+  const index = rows.findIndex((row) => row.id === targetId)
+  if (index < 0) return rows
+  const insertAt = position === 'above' ? index : index + 1
+  const newRow = createNovaLinhaConsumo(mes, String(insertAt + 1))
+  const next = [...rows.slice(0, insertAt), newRow, ...rows.slice(insertAt)]
+  return renumerarLinhasConsumo(next)
+}
+
+export function excluirLinhaConsumo(
+  rows: ConsumoMaterialRow[],
+  rowId: string,
+): ConsumoMaterialRow[] {
+  if (rows.length <= 1) return rows
+  return renumerarLinhasConsumo(rows.filter((row) => row.id !== rowId))
+}
+
+export function atualizarCampoConsumo(
+  row: ConsumoMaterialRow,
+  field: ConsumoMaterialColunaKey,
+  value: string,
+): ConsumoMaterialRow {
+  let next: ConsumoMaterialRow
+  if (field === 'valor' || field === 'valorUnitario') {
+    const valorNumericoCampo = parseValorBrasileiro(value)
+    if (field === 'valor') {
+      next = {
+        ...row,
+        valor: value,
+        valorNumerico: valorNumericoCampo,
+      }
+    } else {
+      const qtd = parseInt(row.qtd || '1', 10) || 1
+      const total = valorNumericoCampo * qtd
+      next = {
+        ...row,
+        valorUnitario: value,
+        valor: total > 0 ? formatValorBrasileiro(total) : row.valor,
+        valorNumerico: total > 0 ? total : row.valorNumerico,
+      }
+    }
+  } else if (field === 'qtd') {
+    const qtd = parseInt(value || '1', 10) || 1
+    const unit = parseValorBrasileiro(row.valorUnitario)
+    const total = unit > 0 ? unit * qtd : row.valorNumerico
+    next = {
+      ...row,
+      qtd: value,
+      valor: total > 0 && unit > 0 ? formatValorBrasileiro(total) : row.valor,
+      valorNumerico: unit > 0 ? total : row.valorNumerico,
+    }
+  } else if (field === 'itemPme') {
+    next = {
+      ...row,
+      itemPme: value,
+      materiais: value || row.materiais,
+    }
+  } else if (field === 'maneiraFornecimento') {
+    next = {
+      ...row,
+      maneiraFornecimento: value,
+      maneiraDispensacao: value || row.maneiraDispensacao,
+    }
+  } else {
+    next = { ...row, [field]: value }
+  }
+
+  if (field === 'valor' || field === 'valorUnitario' || field === 'qtd' || field === 'pctIndenizar') {
+    next = {
+      ...next,
+      valorIndenizar: calcValorIndenizar(next.valorNumerico, next.pctIndenizar),
+    }
+  }
+  return next
+}
+
+export function syncExtraRowsFromMesSheet(
+  prevExtraRows: ConsumoMaterialRow[],
+  sheetRows: ConsumoMaterialRow[],
+  mes: MesConsumoModelo,
+  pedidoRowIds: Set<string>,
+): ConsumoMaterialRow[] {
+  const sheetIds = new Set(sheetRows.map((row) => row.id))
+  const kept = prevExtraRows.filter((row) => {
+    if (sheetIds.has(row.id)) return false
+    if (pedidoRowIds.has(row.id)) return false
+    const isDraftMes = row.id.startsWith(`draft-${mes.id}-`)
+    const isMonthExtra =
+      isLinhaPreenchida(row) &&
+      dataPertenceAoMes(row.data, mes) &&
+      !pedidoRowIds.has(row.id)
+    return !isDraftMes && !isMonthExtra
+  })
+  const fromSheet = sheetRows.filter(isLinhaPreenchida)
+  return [...kept, ...fromSheet]
+}

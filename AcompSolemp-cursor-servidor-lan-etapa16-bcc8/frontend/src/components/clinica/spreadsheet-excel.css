@@ -1,0 +1,261 @@
+.excel-sheet {
+  --excel-font: Calibri, 'Segoe UI', Arial, sans-serif;
+  --excel-border: 1px solid #d4d4d4;
+  --excel-header-bg: #f2f2f2;
+  --excel-group-bg: #d9e1f2;
+  --excel-select-header-bg: #e7e6e6;
+  --excel-cell-bg: #ffffff;
+  --excel-selected-bg: #d6eaf8;
+  --excel-hover-bg: #eef6fc;
+  font-family: var(--excel-font);
+  font-size: 11px;
+  color: #000;
+}
+
+.excel-sheet-toolbar {
+  background: #f3f3f3;
+  border-bottom: var(--excel-border);
+}
+
+.excel-sheet-summary {
+  background: #fafafa;
+  border-bottom: var(--excel-border);
+}
+
+.excel-sheet-grid {
+  background: #fff;
+}
+
+.excel-sheet-grid .MuiTable-root {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: max-content;
+}
+
+/* Modo expandido: tabela exatamente na largura da página, sem rolagem horizontal */
+.excel-sheet-fit-width,
+.excel-sheet-fit-width .excel-sheet-grid,
+.excel-sheet-expanded .excel-sheet-grid {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  overflow-x: hidden !important;
+  box-sizing: border-box;
+}
+
+.excel-sheet-fit-width .MuiTable-root,
+.excel-sheet-expanded .MuiTable-root {
+  width: 100% !important;
+  max-width: 100% !important;
+  min-width: 0 !important;
+  table-layout: fixed !important;
+}
+
+.excel-sheet-fit-width .MuiTableCell-root,
+.excel-sheet-expanded .MuiTableCell-root {
+  min-width: 0 !important;
+  white-space: normal !important;
+  overflow: hidden;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.excel-sheet-grid .MuiTableCell-root {
+  border: var(--excel-border);
+  padding: 2px 6px;
+  font-family: var(--excel-font);
+  font-size: 11px;
+  line-height: 1.25;
+  color: #000;
+  vertical-align: middle;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+/* Controle SOLEMP / visualização: quebra de linha para mostrar todo o conteúdo */
+.excel-sheet-grid.excel-sheet-wrap .MuiTableCell-root {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  vertical-align: top;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.excel-sheet-grid.excel-sheet-wrap .excel-col-header,
+.excel-sheet-grid.excel-sheet-wrap .excel-group-header {
+  white-space: normal;
+  vertical-align: middle;
+}
+
+.excel-sheet-grid.excel-sheet-wrap .excel-cell-wrap {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 2px 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
+
+.excel-sheet-grid.excel-sheet-wrap .excel-editable-textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 28px;
+  resize: vertical;
+  font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 2px 4px;
+  margin: 0;
+  display: block;
+  box-sizing: border-box;
+  color: #000;
+}
+
+.excel-sheet-grid.excel-sheet-wrap .excel-editable-textarea:focus {
+  outline: 2px solid #217346;
+  outline-offset: -2px;
+  background: #fff;
+}
+
+.excel-sheet-grid .MuiTableHead .MuiTableCell-root {
+  background: var(--excel-header-bg);
+  font-weight: 700;
+  color: #000;
+}
+
+.excel-sheet-grid .excel-group-header {
+  background: var(--excel-group-bg) !important;
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #000;
+  text-align: center;
+}
+
+.excel-sheet-grid .excel-select-header {
+  background: var(--excel-select-header-bg) !important;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.excel-sheet-grid .excel-col-header {
+  background: var(--excel-header-bg) !important;
+  font-weight: 700;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.excel-sheet-grid .excel-col-header .MuiTableSortLabel-root {
+  color: #000 !important;
+}
+
+.excel-sheet-grid .excel-col-header .MuiTableSortLabel-icon {
+  color: #595959 !important;
+}
+
+.excel-sheet-grid .excel-data-row {
+  background: var(--excel-cell-bg);
+}
+
+.excel-sheet-grid .excel-data-row.excel-row-empty {
+  background: #fafafa;
+}
+
+.excel-sheet-grid .excel-data-row.excel-row-selected {
+  background: var(--excel-selected-bg) !important;
+}
+
+.excel-sheet-grid .excel-data-row:hover {
+  background: var(--excel-hover-bg);
+}
+
+.excel-sheet-grid .excel-data-row.excel-row-selected:hover {
+  background: var(--excel-selected-bg) !important;
+}
+
+.excel-sheet-grid .excel-cell-number {
+  font-family: var(--excel-font);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.excel-sheet-grid .excel-cell-sticky {
+  background: inherit;
+  box-shadow: 2px 0 4px rgba(0, 0, 0, 0.06);
+}
+
+.excel-sheet-grid .excel-select-header .MuiCheckbox-root,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root {
+  color: #595959;
+  padding: 2px;
+}
+
+.excel-sheet-grid .excel-select-header .MuiCheckbox-root.Mui-checked,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.Mui-checked {
+  color: #217346;
+}
+
+/* Linhas já enviadas: cinza opaco, nunca verde */
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-finalizado,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-finalizado.Mui-checked,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-finalizado.Mui-disabled,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-finalizado.Mui-disabled.Mui-checked {
+  color: #9e9e9e !important;
+  opacity: 0.55;
+}
+
+/* Linhas devolvidas: laranja, desmarcadas e reenviáveis */
+.excel-sheet .MuiCheckbox-root.excel-checkbox-devolvido,
+.excel-sheet .MuiCheckbox-root.excel-checkbox-devolvido.Mui-checked,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-devolvido,
+.excel-sheet-grid .excel-data-row .MuiCheckbox-root.excel-checkbox-devolvido.Mui-checked {
+  color: #c2410c !important;
+  opacity: 1;
+}
+
+.excel-sheet-pagination {
+  border-top: var(--excel-border);
+  background: #f3f3f3;
+  font-family: var(--excel-font);
+  font-size: 11px;
+}
+
+.excel-sheet-pagination .MuiTablePagination-selectLabel,
+.excel-sheet-pagination .MuiTablePagination-displayedRows {
+  font-size: 11px;
+}
+
+.excel-editable-input {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+  font-size: 11px;
+  line-height: 1.25;
+  white-space: nowrap;
+  border: none;
+  outline: none;
+  background: transparent;
+  padding: 1px 4px;
+  margin: 0;
+  display: block;
+  box-sizing: border-box;
+  color: #000;
+}
+
+.excel-editable-input:focus {
+  outline: 2px solid #217346;
+  outline-offset: -2px;
+  background: #fff;
+}

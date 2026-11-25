@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OMPS — Instalação</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <h1>OMPS</h1>
+        <p class="lead">Escolha o que deseja instalar neste computador. Apenas uma opção por vez.</p>
+        <p class="meta" id="versionLine"></p>
+      </header>
+
+      <div class="cards">
+        <article class="card" id="cardServer">
+          <h2>Servidor OMPS</h2>
+          <p>Instala o Servidor OMPS (runtime e payload) para hospedar os dados na rede.</p>
+          <p class="hint">Dados: <code>C:\ServidorManager</code></p>
+          <button type="button" class="btn primary" id="btnServer" disabled>Instalar Servidor</button>
+          <p class="status" id="statusServer"></p>
+        </article>
+
+        <article class="card" id="cardClient">
+          <h2>OMPS Usuário</h2>
+          <p>Instala o programa cliente (AcompOPMS) que se conecta ao servidor — URL informada no assistente.</p>
+          <p class="hint">Pasta: <code>%LOCALAPPDATA%\AcompOPMS</code></p>
+          <button type="button" class="btn primary" id="btnClient" disabled>Instalar Cliente</button>
+          <p class="status" id="statusClient"></p>
+        </article>
+      </div>
+
+      <p class="feedback hidden" id="feedback" role="status"></p>
+
+      <footer class="footer">
+        <button type="button" class="btn ghost" id="btnCancel">Cancelar e sair</button>
+      </footer>
+    </main>
+    <script src="hub.js"></script>
+  </body>
+</html>

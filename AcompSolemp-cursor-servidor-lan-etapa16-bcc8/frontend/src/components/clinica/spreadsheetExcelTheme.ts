@@ -1,0 +1,41 @@
+import {
+  PLANILHA_FONT_CSS_VAR,
+  PLANILHA_FONT_SIZE_DEFAULT,
+} from '@/hooks/usePlanilhaFontZoom'
+
+/** Tokens visuais alinhados ao Microsoft Excel (grade, fonte e cores padrão). */
+export const EXCEL_SHEET = {
+  fontFamily: 'Calibri, "Segoe UI", Arial, sans-serif',
+  /** Aparência padrão (planilha não expandida). */
+  fontSize: '11px',
+  /**
+   * Fonte do modo expandido: 15px no zoom 100%; 12px no zoom ~90%
+   * (via CSS var sincronizada em usePlanilhaFontZoom).
+   */
+  fontSizeExpanded: `var(${PLANILHA_FONT_CSS_VAR}, ${PLANILHA_FONT_SIZE_DEFAULT})`,
+  fontWeight: 400,
+  fontWeightBold: 700,
+  lineHeight: 1.2,
+  borderColor: '#d4d4d4',
+  border: '1px solid #d4d4d4',
+  headerBg: '#f2f2f2',
+  groupBg: '#d9e1f2',
+  selectHeaderBg: '#e7e6e6',
+  cellBg: '#ffffff',
+  emptyRowBg: '#fafafa',
+  selectedBg: '#d6eaf8',
+  /** Linha em edição no formulário (verde opaco) */
+  editingBg: '#a5d6a7',
+  hoverBg: '#eef6fc',
+  text: '#000000',
+  mutedText: '#595959',
+  toolbarBg: '#f3f3f3',
+  toolbarBorder: '#d4d4d4',
+  sheetBg: '#ffffff',
+  /** Checkbox de linha já enviada (tarja/estado finalizado) */
+  finalizedCheck: '#9e9e9e',
+  /** Checkbox de linha devolvida (pronta para reenvio) */
+  devolvidoCheck: '#c2410c',
+  /** Checkbox selecionado para novo envio */
+  selectedCheck: '#217346',
+} as const

@@ -1,0 +1,240 @@
+{
+  "name": "servidor-manager",
+  "private": true,
+  "version": "1.1.1",
+  "description": "Servidor Manager — gerenciamento genérico de sistemas no Windows",
+  "author": "Servidor Manager",
+  "main": "desktop/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:omps": "node scripts/dev-omps-ui.mjs",
+    "dev:omps:stack": "node scripts/dev-omps-stack.mjs",
+    "dev:local-service": "node scripts/dev-local-service.mjs",
+    "prepare:omps:dev": "node scripts/prepare-omps-dev.mjs",
+    "build:omps": "npm run build:app:omps && npm run build:service",
+    "ensure:bundled-node": "node scripts/ensure-bundled-node.mjs",
+    "patch:electron-builder-nsis": "node scripts/patch-electron-builder-nsis-uninstaller.mjs && node scripts/patch-electron-builder-nsis-before-copy.mjs && node scripts/patch-electron-builder-wincodesign-vendor.mjs && node scripts/patch-electron-builder-binDownload-wincodesign.mjs",
+    "ensure:wincodesign-vendor": "node scripts/ensure-wincodesign-vendor.mjs",
+    "test:manager-runtime": "node --test scripts/manager-node-runtime.test.mjs",
+    "build": "npm run build:app && npm run build:service",
+    "build:app": "node scripts/stamp-manager-version.mjs && tsc -b && vite build",
+    "build:app:omps": "node scripts/stamp-manager-version.mjs --omps && tsc -b && vite build",
+    "build:service": "node scripts/bundle-local-service.mjs",
+    "package": "npm run patch:electron-builder-nsis && npm run ensure:bundled-node && npm run ensure:wincodesign-vendor && npm run build && electron-builder --win",
+    "package:installer": "npm run patch:electron-builder-nsis && npm run ensure:bundled-node && npm run ensure:wincodesign-vendor && npm run build && electron-builder --win nsis --config.win.target=nsis",
+    "build:omps-payload": "node scripts/build-omps-payload.mjs",
+    "verify:omps-payload": "node scripts/build-omps-payload.mjs --verify-only",
+    "validate:distributed-omps-payload": "node scripts/validate-distributed-omps-payload-sync.mjs",
+    "test:omps-payload": "node --test scripts/build-omps-payload.test.mjs scripts/validate-servidor-omps-product-config.test.mjs scripts/validate-servidor-omps-install-dir.test.mjs scripts/validate-servidor-omps-nsis-close.test.mjs scripts/validate-servidor-omps-shortcuts.test.mjs scripts/validate-omps-unified-product-config.test.mjs scripts/validate-nsis-app-cannot-be-closed-origin.test.mjs scripts/validate-omps-hub-nsis-failure-point.test.mjs scripts/omps-hub-subinstallers.test.mjs scripts/omps-hub-launch-server.test.mjs scripts/omps-hub-ui.test.mjs scripts/prepare-omps-unified-subinstallers.test.mjs scripts/inspect-servidor-omps-artifacts.test.mjs scripts/validate-nsis-uninstaller-patch.test.mjs scripts/validate-nsis-uninstaller-artifact.test.mjs scripts/validate-omps-distribution-audit-exclusion.test.mjs scripts/verify-omps-installer-close-hooks.test.mjs",
+    "verify:servidor-omps-uninstaller-stub": "node scripts/verify-servidor-omps-uninstaller-stub.mjs",
+    "inspect:servidor-omps-artifacts": "node scripts/inspect-servidor-omps-artifacts.mjs",
+    "test:bundled-omps": "node --test local-service/src/bundledOmps/*.test.ts",
+    "test:app-navigation": "node --test src/utils/appSurfaceNavigation.test.ts",
+    "test:installation-duplicate-ui": "node --test src/utils/installationDuplicateConflict.test.ts src/utils/bundledOmpsDuplicateInstallFlow.test.ts",
+    "test:isolated-profile": "node --test local-service/src/runtime/managerRuntimeConfig.test.ts local-service/src/installation/managerDataRoot.test.ts scripts/manager-isolated-test-profile.test.mjs",
+    "sign:omps-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Sign-OmpsWindowsRelease.ps1",
+    "package:servidor-omps": "npm run patch:electron-builder-nsis && npm run ensure:bundled-node && npm run build:app:omps && npm run build:service && npm run build:omps-payload && electron-builder --win --dir --config electron-builder.servidor-omps.yml && node scripts/apply-omps-exe-metadata.mjs servidor-omps && npm run sign:omps-release -- -Variant servidor-omps -Stage win-unpacked -IfConfigured && electron-builder --win nsis --config electron-builder.servidor-omps.yml --prepackaged release/servidor-omps/win-unpacked --config.win.target=nsis && npm run sign:omps-release -- -Variant servidor-omps -Stage nsis -IfConfigured && npm run validate:distributed-omps-payload",
+    "package:servidor-omps:dir": "npm run patch:electron-builder-nsis && npm run ensure:bundled-node && npm run build:app:omps && npm run build:service && npm run build:omps-payload && electron-builder --win --dir --config electron-builder.servidor-omps.yml && npm run validate:distributed-omps-payload",
+    "build:omps-client-installer": "npm ci --prefix \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/instalador\" && npm run build:win --prefix \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/instalador\" -- --config.win.signAndEditExecutable=false",
+    "prepare:omps-usuario-build": "node scripts/prepare-omps-usuario-build.mjs",
+    "inspect:omps-usuario-artifacts": "node scripts/inspect-omps-usuario-artifacts.mjs",
+    "test:omps-usuario": "node --test scripts/validate-omps-usuario-installer.test.mjs \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/cliente/test/fixed-lan-product.test.mjs\" \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/cliente/test/load-config-omps-production.test.mjs\" \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/cliente/test/fetch-server-connection.test.mjs\" \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Instalador OPMS/cliente/test/discover-lan-interfaces.test.mjs\" scripts/inspect-omps-usuario-artifacts.test.mjs",
+    "test:omps-lan-firewall": "node --test \"AcompSolemp-cursor-servidor-lan-etapa16-bcc8/Transferir para Servidor/servidor-lan/test/firewall-lan-plan.test.mjs\"",
+    "test:omps-desktop-shortcuts": "node --test scripts/validate-servidor-omps-shortcuts.test.mjs scripts/resolve-omps-user-desktop.test.mjs scripts/omps-shortcut-flag-contract.test.mjs",
+    "verify:omps-shortcut-bootstrap": "node scripts/verify-omps-shortcut-bootstrap-in-artifacts.mjs",
+    "verify:omps-authenticode": "node scripts/verify-omps-authenticode-status.mjs",
+    "test:omps-authenticode": "node --test scripts/validate-omps-authenticode.test.mjs",
+    "apply:omps-exe-metadata": "node scripts/apply-omps-exe-metadata.mjs",
+    "package:omps-usuario": "npm run patch:electron-builder-nsis && npm run prepare:omps-usuario-build && electron-builder --win --dir --config electron-builder.omps-usuario.yml && node scripts/apply-omps-exe-metadata.mjs omps-usuario && npm run sign:omps-release -- -Variant omps-usuario -Stage win-unpacked -IfConfigured && electron-builder --win nsis --config electron-builder.omps-usuario.yml --prepackaged release/omps-usuario/win-unpacked --config.win.target=nsis && npm run sign:omps-release -- -Variant omps-usuario -Stage nsis -IfConfigured && npm run inspect:omps-usuario-artifacts",
+    "package:omps-usuario:dir": "npm run prepare:omps-usuario-build && electron-builder --win --dir --config electron-builder.omps-usuario.yml",
+    "prepare:omps-unified-subinstallers": "node scripts/prepare-omps-unified-subinstallers.mjs",
+    "prepare:omps-unified-subinstallers:partial": "node scripts/prepare-omps-unified-subinstallers.mjs --allow-missing-server-nsis --allow-missing-client",
+    "prepare:omps-unified-release": "node scripts/prepare-omps-unified-release.mjs",
+    "inspect:omps-unified-release": "node scripts/inspect-omps-unified-release.mjs",
+    "verify:omps-distributables": "node scripts/verify-omps-distributables-readonly.mjs",
+    "package:omps-unified-dist": "npm run prepare:omps-unified-subinstallers && npm run prepare:omps-unified-release && npm run inspect:omps-unified-release && npm run verify:omps-distributables",
+    "test:omps-unified": "node --test scripts/omps-hub-subinstallers.test.mjs scripts/omps-hub-launch-server.test.mjs scripts/omps-hub-ui.test.mjs scripts/prepare-omps-unified-subinstallers.test.mjs scripts/validate-omps-unified-release.test.mjs scripts/inspect-omps-unified-release.test.mjs",
+    "package:omps-hub:dir": "npm run ensure:omps-hub-electron && npm run prepare:omps-unified-subinstallers:partial && electron-builder --win --dir --config electron-builder.omps-unified.yml",
+    "package:omps-hub": "npm run patch:electron-builder-nsis && npm run ensure:omps-hub-electron && npm run prepare:omps-unified-subinstallers && electron-builder --win nsis --config electron-builder.omps-unified.yml --config.win.target=nsis",
+    "package:omps-unified:dir": "npm run package:omps-hub:dir",
+    "package:omps-unified": "npm run package:omps-hub",
+    "ensure:omps-hub-electron": "npm install --prefix omps-hub --no-fund --no-audit",
+    "package:servidor-exe": "npm run package:installer && node scripts/copy-servidor-installer.mjs",
+    "package:dir": "npm run patch:electron-builder-nsis && npm run ensure:bundled-node && npm run ensure:wincodesign-vendor && npm run build && electron-builder --win --dir && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Sign-ManagerWindowsRelease.ps1 -IfConfigured",
+    "test:wincodesign-vendor": "node --test scripts/validate-wincodesign-vendor-patch.test.mjs",
+    "test:omps-lan-ui": "node --test src/utils/ompsContractAccessUi.test.ts scripts/inspect-servidor-omps-ui-lan.test.mjs",
+    "verify:win-signature": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-ManagerWindowsReleaseSignature.ps1",
+    "update:installed": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Update-InstalledManager.ps1",
+    "refresh:installed": "npm run package:dir && npm run update:installed",
+    "acceptance:manifest-lan": "node scripts/run-manifest-lan-acceptance.mjs",
+    "acceptance:server-bootstrap": "node scripts/run-server-bootstrap-acceptance.mjs",
+    "release:manifest-lan": "npm run package:dir && npm run acceptance:manifest-lan && npm run update:installed",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "start:browser": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Start-ServidorManager-Browser.ps1"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "7zip-bin": "^5.2.0",
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.28.0",
+    "oxlint": "^1.81.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.3.0"
+  },
+  "build": {
+    "appId": "com.servidor.manager",
+    "productName": "Servidor Manager",
+    "copyright": "Copyright © Servidor Manager",
+    "directories": {
+      "output": "release",
+      "buildResources": "desktop"
+    },
+    "files": [
+      "dist/**/*",
+      "desktop/main.cjs",
+      "desktop/preload.cjs",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist-local-service",
+        "to": "local-service",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "dist",
+        "to": "ui-dist",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "scripts/serve-manager-ui.mjs",
+        "to": "manager-launcher/serve-manager-ui.mjs"
+      },
+      {
+        "from": "scripts/validate-manager-ui-bundle.mjs",
+        "to": "manager-launcher/validate-manager-ui-bundle.mjs"
+      },
+      {
+        "from": "scripts/Resolve-ManagerInstallRoot.ps1",
+        "to": "manager-launcher/Resolve-ManagerInstallRoot.ps1"
+      },
+      {
+        "from": "scripts/Launch-ServidorManager-Hidden.vbs",
+        "to": "manager-launcher/Launch-ServidorManager-Hidden.vbs"
+      },
+      {
+        "from": "scripts/Launch-ServidorManager.cmd",
+        "to": "manager-launcher/Launch-ServidorManager.cmd"
+      },
+      {
+        "from": "scripts/manager-localhost-only-guard.mjs",
+        "to": "manager-launcher/manager-localhost-only-guard.mjs"
+      },
+      {
+        "from": "scripts/Start-ServidorManager-NoElectron.ps1",
+        "to": "manager-launcher/Start-ServidorManager-NoElectron.ps1"
+      },
+      {
+        "from": "scripts/Resolve-ManagerNodeRuntime.ps1",
+        "to": "manager-launcher/Resolve-ManagerNodeRuntime.ps1"
+      },
+      {
+        "from": "scripts/ManagerLauncherSession.ps1",
+        "to": "manager-launcher/ManagerLauncherSession.ps1"
+      },
+      {
+        "from": "scripts/ManagerLauncherProfile.ps1",
+        "to": "manager-launcher/ManagerLauncherProfile.ps1"
+      },
+      {
+        "from": "scripts/Stop-ServidorManager-Installed.ps1",
+        "to": "manager-launcher/Stop-ServidorManager-Installed.ps1"
+      },
+      {
+        "from": "scripts/Invoke-ServerBootstrap.ps1",
+        "to": "server-bootstrap/Invoke-ServerBootstrap.ps1"
+      },
+      {
+        "from": "scripts/PostInstall-ManagerShortcuts.ps1",
+        "to": "server-bootstrap/PostInstall-ManagerShortcuts.ps1"
+      },
+      {
+        "from": "scripts/Create-DesktopShortcut-Manager.ps1",
+        "to": "server-bootstrap/Create-DesktopShortcut-Manager.ps1"
+      },
+      {
+        "from": "scripts/Start-ServidorManager-NoElectron.ps1",
+        "to": "server-bootstrap/Start-ServidorManager-NoElectron.ps1"
+      },
+      {
+        "from": "scripts/Resolve-ManagerNodeRuntime.ps1",
+        "to": "server-bootstrap/Resolve-ManagerNodeRuntime.ps1"
+      },
+      {
+        "from": "scripts/ManagerLauncherSession.ps1",
+        "to": "server-bootstrap/ManagerLauncherSession.ps1"
+      },
+      {
+        "from": "scripts/Stop-ServidorManager-Installed.ps1",
+        "to": "server-bootstrap/Stop-ServidorManager-Installed.ps1"
+      },
+      {
+        "from": "vendor/bundled-node/win-x64",
+        "to": "nodejs",
+        "filter": [
+          "node.exe",
+          "LICENSE",
+          "manifest.json"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "executableName": "ServidorManager",
+      "signAndEditExecutable": false
+    },
+    "portable": {
+      "artifactName": "ServidorManager.${ext}"
+    },
+    "nsis": {
+      "artifactName": "servidor.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "include": "desktop/installer.nsh",
+      "uninstallDisplayName": "Servidor Manager",
+      "shortcutName": "Servidor Manager"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "currentVersion": "1.1.1",
+  "lastBuiltAt": "2026-11-24T14:26:53.768Z",
+  "entries": [
+    {
+      "version": "1.1.1",
+      "updatedAt": "2026-10-09T22:55:00.000Z",
+      "title": "Correção de instalação (npm + GitHub Pages)",
+      "changes": [
+        "npm install inclui devDependencies mesmo com Manager em produção (corrige tsc/vite build).",
+        "URLs github.io convertidas automaticamente para github.com na UI.",
+        "Scripts Setup-ServidorMachine.ps1, Install-ProjectViaApi.ps1, Update-InstalledManager.ps1."
+      ]
+    },
+    {
+      "version": "1.1.0",
+      "updatedAt": "2026-10-09T14:16:00.000Z",
+      "title": "Aba Atualização no Manager",
+      "changes": [
+        "Nova aba Atualização com histórico de versões e data/hora.",
+        "Versão do Manager sincronizada automaticamente a cada build.",
+        "Registro de melhorias feitas via Cursor (LAN, firewall, bootstrap)."
+      ]
+    },
+    {
+      "version": "1.0.0",
+      "updatedAt": "2026-10-08T15:00:00.000Z",
+      "title": "Acesso em rede e remoto",
+      "changes": [
+        "LAN: allowLanAccess, URLs na UI e patch de .env para IP local.",
+        "Scripts Ensure-LanFirewallRules e acesso LAN na UI.",
+        "Preview Vite com allowedHosts para IPv4/hostname na rede local."
+      ]
+    }
+  ]
+}

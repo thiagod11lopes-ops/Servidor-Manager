@@ -1,0 +1,743 @@
+import type { DadosClinicaLancamento, PacientePedido, PedidoComDetalhes } from '@/types'
+import { useCloudAppDataSync } from '@/config/dataSource'
+import { flushSupabaseAppDataSync } from '@/data/persistence/supabaseSync'
+import {
+  DEMO_EXEMPLO_USER_PREFIX,
+  ensureDemoUserById,
+} from '@/services/demoCadastrosService'
+import { enrichPedido } from '@/utils/workflow'
+import {
+  advancePedidoEtapa,
+  createNotaFiscalForPedido,
+  createSolempForPedido,
+  revertPedidoEtapa,
+} from '@/utils/workflowAdvance'
+import { CLINICA_ETAPA_ACOES } from '@/utils/portal'
+import { getSolempDefaults, type SolempNumeroParts } from '@/utils/solemp'
+import { delay, loadAppData, loadFreshAppData, saveAppData } from '@/mocks/seed'
+import { removePedidosFromAppData } from '@/utils/pedidoCleanup'
+import {
+  notifyPlanilhaCorrigidaReenviada,
+  notifySetoresEtapasAtivas,
+} from '@/utils/workflowAdvance'
+import { limparEstadoDevolucaoPlanilha } from '@/utils/devolverPlanilha'
+import { formatDuracaoEntre, formatTempoCorrecaoPrefixo } from '@/utils/format'
+
+export interface CreatePedidoInput {
+  id?: string
+  fluxo?: 'auditoria' | 'confeccao' | 'paralelo' | 'imh'
+  consumoRowIds?: string[]
+  paciente: PacientePedido
+  dadosClinica: DadosClinicaLancamento
+}
+
+function ensureEmpresaByNome(
+  data: ReturnType<typeof loadAppData>,
+  nome: string,
+): string {
+  const trimmed = nome.trim()
+  const existing = data.empresas.find(
+    (e) =>
+      e.nomeFantasia.localeCompare(trimmed, 'pt-BR', { sensitivity: 'accent' }) === 0 ||
+      e.razaoSocial.localeCompare(trimmed, 'pt-BR', { sensitivity: 'accent' }) === 0,
+  )
+  if (existing) return existing.id
+
+  const id = `empresa-${Date.now()}`
+  data.empresas.push({
+    id,
+    razaoSocial: trimmed,
+    nomeFantasia: trimmed,
+    cnpj: '',
+    contato: '',
+    telefone: '',
+    email: '',
+  })
+  return id
+}
+
+function ensureMaterialByDescricao(
+  data: ReturnType<typeof loadAppData>,
+  descricaoInput: string,
+): string {
+  const trimmed = descricaoInput.trim()
+  const existing = data.materiais.find(
+    (m) => m.descricao.localeCompare(trimmed, 'pt-BR', { sensitivity: 'accent' }) === 0,
+  )
+  if (existing) return existing.id
+
+  const id = `material-${Date.now()}`
+  data.materiais.push({
+    id,
+    descricao: trimmed,
+    fabricante: '',
+    unidade: 'UN',
+  })
+  return id
+}
+
+export interface ExecutarAcaoInput {
+  pedidoId: string
+  usuarioId: string
+  clinicaId: string
+  solempNumero?: string
+  notaFiscalNumero?: string
+}
+
+function resolvePlanilhaDevolvidaEm(
+  pedido: ReturnType<typeof loadAppData>['pedidos'][number],
+): string | null {
+  if (pedido.planilhaDevolvidaEm) return pedido.planilhaDevolvidaEm
+  const historico = pedido.planilhaDevolucoes
+  if (!historico?.length) return null
+  return historico[historico.length - 1]?.em ?? null
+}
+
+function reabrirPedidoAposDevolucaoOrigem(
+  data: ReturnType<typeof loadAppData>,
+  pedido: ReturnType<typeof loadAppData>['pedidos'][number],
+  novaEtapaId: string,
+  agora: string,
+): { reabriu: boolean; devolvidaEm: string | null } {
+  if (pedido.planilhaDevolvidaParaChave !== 'SOLICITACAO') {
+    return { reabriu: false, devolvidaEm: null }
+  }
+  const devolvidaEm = resolvePlanilhaDevolvidaEm(pedido)
+  limparEstadoDevolucaoPlanilha(data, pedido.id)
+  pedido.planilhaDevolvidaParaChave = null
+  pedido.planilhaDevolvidaEm = null
+  pedido.planilhaDevolvidaJustificativa = null
+  const solicitacao = data.workflowEtapas.find((e) => e.chave === 'SOLICITACAO')
+  if (solicitacao) {
+    const hist = pedido.etapasHistorico.find(
+      (h) => h.etapaId === solicitacao.id || h.etapaNome === solicitacao.nome,
+    )
+    if (hist && !hist.dataConclusao) hist.dataConclusao = agora
+    pedido.etapasAtivasIds = pedido.etapasAtivasIds.filter((id) => id !== solicitacao.id)
+  }
+  pedido.etapaAtualId = novaEtapaId
+  return { reabriu: true, devolvidaEm }
+}
+
+function getContext(data: ReturnType<typeof loadAppData>) {
+  return {
+    clinicas: data.clinicas,
+    empresas: data.empresas,
+    materiais: data.materiais,
+    etapas: data.workflowEtapas,
+    usuarios: data.usuarios,
+    solemp: data.solemp,
+    notasFiscais: data.notasFiscais,
+  }
+}
+
+export const clinicaPedidoService = {
+  async listByClinica(clinicaId: string): Promise<PedidoComDetalhes[]> {
+    await delay(null)
+    const data = await loadFreshAppData()
+    return data.pedidos
+      .filter((p) => p.clinicaId === clinicaId)
+      .map((p) => enrichPedido(p, getContext(data)))
+      .filter((p): p is PedidoComDetalhes => p !== null)
+      .sort((a, b) => new Date(b.dataSolicitacao).getTime() - new Date(a.dataSolicitacao).getTime())
+  },
+
+  async getById(id: string, clinicaId: string): Promise<PedidoComDetalhes | null> {
+    await delay(null)
+    let data = await loadFreshAppData()
+    let pedido = data.pedidos.find((p) => p.id === id && p.clinicaId === clinicaId)
+    // Pedido acabou de ser criado e o sync remoto ainda não refletiu: usa cache local.
+    if (!pedido) {
+      data = loadAppData()
+      pedido = data.pedidos.find((p) => p.id === id && p.clinicaId === clinicaId)
+    }
+    if (!pedido) return null
+    return enrichPedido(pedido, getContext(data))
+  },
+
+  getSolempDefaults(clinicaId: string): SolempNumeroParts {
+    const data = loadAppData()
+    return getSolempDefaults(data, clinicaId)
+  },
+
+  async create(
+    input: CreatePedidoInput,
+    usuarioId: string,
+    clinicaId: string,
+  ): Promise<PedidoComDetalhes> {
+    await delay(null, 500)
+
+    if (usuarioId.startsWith(DEMO_EXEMPLO_USER_PREFIX)) {
+      await ensureDemoUserById(usuarioId)
+    }
+
+    let data = loadAppData()
+    let usuario = data.usuarios.find((u) => u.id === usuarioId)
+    if (!usuario) throw new Error('Usuário não encontrado')
+
+    if (!data.clinicas.some((clinica) => clinica.id === clinicaId)) {
+      const clinicaUsuario = data.usuarios.find(
+        (item) =>
+          item.clinicaId === clinicaId &&
+          (item.perfil === 'CLINICA' ||
+            item.perfil === 'MEDICAMENTO' ||
+            item.perfil === 'EMPENHADO'),
+      )
+      const tipoEntidade =
+        clinicaUsuario?.perfil === 'MEDICAMENTO'
+          ? 'medicamento'
+          : clinicaUsuario?.perfil === 'EMPENHADO'
+            ? 'empenhado'
+            : 'clinica'
+      data.clinicas.push({
+        id: clinicaId,
+        nome:
+          clinicaUsuario?.nome ??
+          (tipoEntidade === 'medicamento'
+            ? 'Medicamento'
+            : tipoEntidade === 'empenhado'
+              ? 'Empenhado'
+              : 'Clínica'),
+        responsavel: clinicaUsuario?.nome ?? '—',
+        telefone: '',
+        tipo: tipoEntidade,
+      })
+    }
+
+    const etapas = [...data.workflowEtapas].sort((a, b) => a.ordem - b.ordem)
+    const solicitacao = etapas.find((e) => e.chave === 'SOLICITACAO')
+    const auditoria = etapas.find((e) => e.chave === 'DIV_MAT_AUDITORIA')
+    const confeccao = etapas.find((e) => e.chave === 'DIV_MAT_CONFECCAO_SOLEMP')
+    const contabilidade = etapas.find((e) => e.chave === 'DIV_MAT_CONTABILIDADE_IMH')
+    const somenteImh = input.fluxo === 'imh'
+    if (!solicitacao || (somenteImh ? !contabilidade : !auditoria || !confeccao)) {
+      throw new Error('Workflow não configurado')
+    }
+
+    const numero = `PED-${String(data.pedidos.length + 1).padStart(5, '0')}`
+    const agora = new Date().toISOString()
+    const pedidoId = input.id ?? `pedido-${Date.now()}`
+    if (data.pedidos.some((p) => p.id === pedidoId)) {
+      throw new Error('Este lançamento já possui um processo em andamento.')
+    }
+
+    const empresaId = ensureEmpresaByNome(data, input.dadosClinica.empresaConsignada)
+    const materialId = ensureMaterialByDescricao(data, input.dadosClinica.materialUtilizado)
+    const somenteConfeccao = input.fluxo === 'confeccao'
+    const observacaoInicial = somenteImh
+      ? input.consumoRowIds && input.consumoRowIds.length > 1
+        ? `Planilha enviada com ${input.consumoRowIds.length} lançamentos para IMH.`
+        : `Lançamento enviado diretamente para IMH — ${input.paciente.nome}.`
+      : input.consumoRowIds && input.consumoRowIds.length > 1
+        ? somenteConfeccao
+          ? `Planilha enviada com ${input.consumoRowIds.length} lançamentos para Confecção de Solemp.`
+          : `Planilha enviada com ${input.consumoRowIds.length} lançamentos para Auditoria.`
+        : somenteConfeccao
+          ? `Lançamento enviado para Confecção de Solemp — ${input.paciente.nome}.`
+          : `Lançamento do paciente ${input.paciente.nome}.`
+
+    const historicoContabilidade = somenteImh
+      ? {
+          etapaId: contabilidade!.id,
+          etapaNome: contabilidade!.nome,
+          responsavelId: usuario.id,
+          responsavelNome: usuario.nome,
+          dataInicio: agora,
+          dataConclusao: null as string | null,
+          observacao: 'Aguardando recebimento da planilha pela IMH.',
+          arquivos: [] as never[],
+        }
+      : null
+
+    const historicoAuditoria = somenteImh || somenteConfeccao
+      ? null
+      : {
+          etapaId: auditoria!.id,
+          etapaNome: auditoria!.nome,
+          responsavelId: usuario.id,
+          responsavelNome: usuario.nome,
+          dataInicio: agora,
+          dataConclusao: null as string | null,
+          observacao: 'Aguardando recebimento da planilha pela Auditoria.',
+          arquivos: [] as never[],
+        }
+
+    // Confecção só inicia quando a Auditoria encaminha (exceto envio direto só-Confecção).
+    const historicoConfeccao = somenteConfeccao
+      ? {
+          etapaId: confeccao!.id,
+          etapaNome: confeccao!.nome,
+          responsavelId: usuario.id,
+          responsavelNome: usuario.nome,
+          dataInicio: agora,
+          dataConclusao: null as string | null,
+          observacao: 'Aguardando recebimento da planilha pela Confecção de Solemp.',
+          arquivos: [] as never[],
+        }
+      : null
+
+    const pedido = {
+      id: pedidoId,
+      numero,
+      clinicaId,
+      empresaId,
+      materialId,
+      quantidade: input.dadosClinica.quantidade,
+      valor: input.dadosClinica.valorTotal,
+      observacoes: observacaoInicial,
+      paciente: input.paciente,
+      dadosClinica: input.dadosClinica,
+      consumoRowIds: input.consumoRowIds,
+      dataSolicitacao: agora,
+      dataEntrega: null,
+      etapaAtualId: somenteImh
+        ? contabilidade!.id
+        : somenteConfeccao
+          ? confeccao!.id
+          : auditoria!.id,
+      etapasAtivasIds: somenteImh
+        ? [contabilidade!.id]
+        : somenteConfeccao
+          ? [confeccao!.id]
+          : [auditoria!.id],
+      responsavelAtualId: usuario.id,
+      concluido: false,
+      etapasHistorico: [
+        {
+          etapaId: solicitacao.id,
+          etapaNome: solicitacao.nome,
+          responsavelId: usuario.id,
+          responsavelNome: usuario.nome,
+          dataInicio: agora,
+          dataConclusao: agora,
+          observacao: observacaoInicial,
+          arquivos: [],
+        },
+        ...(historicoAuditoria ? [historicoAuditoria] : []),
+        ...(historicoConfeccao ? [historicoConfeccao] : []),
+        ...(historicoContabilidade ? [historicoContabilidade] : []),
+      ],
+    }
+
+    data.pedidos.push(pedido)
+    data.historico.push({
+      id: `hist-${Date.now()}`,
+      pedidoId: pedido.id,
+      etapaId: solicitacao.id,
+      etapaNome: solicitacao.nome,
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      data: agora,
+      observacao: somenteImh
+        ? `Timeline iniciada — pedido ${numero} enviado diretamente para IMH.`
+        : somenteConfeccao
+          ? `Timeline iniciada — pedido ${numero} enviado para Confecção de Solemp.`
+          : `Timeline iniciada — pedido ${numero} enviado para Auditoria.`,
+    })
+
+    notifySetoresEtapasAtivas(data, pedido.id)
+    saveAppData(data)
+    if (useCloudAppDataSync()) {
+      await flushSupabaseAppDataSync()
+    }
+    const enriched = enrichPedido(pedido, getContext(data))
+    if (!enriched) throw new Error('Erro ao criar pedido')
+    return enriched
+  },
+
+  async adicionarFluxoParalelo(
+    pedidoId: string,
+    fluxo: 'auditoria' | 'confeccao',
+    usuarioId: string,
+    clinicaId: string,
+  ): Promise<PedidoComDetalhes> {
+    await delay(null, 300)
+
+    if (usuarioId.startsWith(DEMO_EXEMPLO_USER_PREFIX)) {
+      await ensureDemoUserById(usuarioId)
+    }
+
+    let data = loadAppData()
+    const usuario = data.usuarios.find((u) => u.id === usuarioId)
+    if (!usuario) throw new Error('Usuário não encontrado')
+
+    const pedidoIndex = data.pedidos.findIndex(
+      (p) => p.id === pedidoId && p.clinicaId === clinicaId,
+    )
+    if (pedidoIndex < 0) throw new Error('Pedido não encontrado')
+
+    const etapas = [...data.workflowEtapas].sort((a, b) => a.ordem - b.ordem)
+    const auditoria = etapas.find((e) => e.chave === 'DIV_MAT_AUDITORIA')
+    const confeccao = etapas.find((e) => e.chave === 'DIV_MAT_CONFECCAO_SOLEMP')
+    if (!auditoria || !confeccao) throw new Error('Workflow não configurado')
+
+    const targetEtapa = fluxo === 'auditoria' ? auditoria : confeccao
+    const pedido = {
+      ...data.pedidos[pedidoIndex],
+      etapasHistorico: [...data.pedidos[pedidoIndex].etapasHistorico],
+      etapasAtivasIds: [...(data.pedidos[pedidoIndex].etapasAtivasIds ?? [])],
+    }
+
+    const hasOpenTrack = pedido.etapasHistorico.some(
+      (h) => h.etapaId === targetEtapa.id && !h.dataConclusao,
+    )
+    const alreadyInAtivas = pedido.etapasAtivasIds.includes(targetEtapa.id)
+    const estavaDevolvidaOrigem = pedido.planilhaDevolvidaParaChave === 'SOLICITACAO'
+
+    if (hasOpenTrack && alreadyInAtivas && !estavaDevolvidaOrigem) {
+      const enriched = enrichPedido(pedido, getContext(data))
+      if (!enriched) throw new Error('Erro ao atualizar pedido')
+      return enriched
+    }
+
+    const agora = new Date().toISOString()
+    const { reabriu, devolvidaEm } = reabrirPedidoAposDevolucaoOrigem(
+      data,
+      pedido,
+      targetEtapa.id,
+      agora,
+    )
+    const countRows = pedido.consumoRowIds?.length ?? 0
+    const tempoCorrecao = reabriu ? formatDuracaoEntre(devolvidaEm, agora) : null
+    const tempoTxt = formatTempoCorrecaoPrefixo(tempoCorrecao)
+
+    if (!hasOpenTrack && !pedido.etapasHistorico.some((h) => h.etapaId === targetEtapa.id)) {
+      pedido.etapasHistorico.push({
+        etapaId: targetEtapa.id,
+        etapaNome: targetEtapa.nome,
+        responsavelId: usuario.id,
+        responsavelNome: usuario.nome,
+        dataInicio: agora,
+        dataConclusao: null,
+        observacao:
+          fluxo === 'auditoria'
+            ? reabriu
+              ? `Planilha corrigida e reenviada${tempoTxt}. Aguardando recebimento pela Auditoria.`
+              : 'Aguardando recebimento da planilha pela Auditoria.'
+            : reabriu
+              ? `Planilha corrigida e reenviada${tempoTxt}. Aguardando recebimento pela Confecção de Solemp.`
+              : 'Aguardando recebimento da planilha pela Confecção de Solemp.',
+        arquivos: [],
+      })
+    } else if (hasOpenTrack) {
+      pedido.etapasHistorico = pedido.etapasHistorico.map((h) =>
+        h.etapaId === targetEtapa.id && !h.dataConclusao
+          ? {
+              ...h,
+              responsavelId: h.responsavelId ?? usuario.id,
+              responsavelNome: h.responsavelNome ?? usuario.nome,
+            }
+          : h,
+      )
+    }
+
+    if (!alreadyInAtivas) {
+      pedido.etapasAtivasIds.push(targetEtapa.id)
+    }
+
+    const temAuditoria = pedido.etapasAtivasIds.includes(auditoria.id)
+    const temConfeccao = pedido.etapasAtivasIds.includes(confeccao.id)
+    if (temAuditoria && temConfeccao) {
+      pedido.etapasAtivasIds = [confeccao.id, auditoria.id]
+      pedido.etapaAtualId = confeccao.id
+      pedido.observacoes =
+        countRows > 1
+          ? `Planilha enviada com ${countRows} lançamentos em fluxo paralelo — Auditoria e Confecção de Solemp.`
+          : 'Planilha em fluxo paralelo — Auditoria e Confecção de Solemp.'
+    }
+
+    data.pedidos[pedidoIndex] = pedido
+    data.historico.push({
+      id: `hist-${Date.now()}`,
+      pedidoId,
+      etapaId: targetEtapa.id,
+      etapaNome: targetEtapa.nome,
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      data: agora,
+      observacao: reabriu
+        ? fluxo === 'auditoria'
+          ? `Planilha corrigida e reenviada${tempoTxt} para Auditoria — ${pedido.numero}.`
+          : `Planilha corrigida e reenviada${tempoTxt} para Confecção de Solemp — ${pedido.numero}.`
+        : fluxo === 'auditoria'
+          ? `Planilha também enviada para Auditoria — ${pedido.numero}.`
+          : `Planilha também enviada para Confecção de Solemp — ${pedido.numero}.`,
+    })
+
+    if (reabriu) {
+      notifyPlanilhaCorrigidaReenviada(data, pedidoId, {
+        usuarioNome: usuario.nome,
+        devolvidaEm,
+        agora,
+      })
+    } else {
+      notifySetoresEtapasAtivas(data, pedidoId)
+    }
+    saveAppData(data)
+    if (useCloudAppDataSync()) {
+      await flushSupabaseAppDataSync()
+    }
+
+    const enriched = enrichPedido(pedido, getContext(data))
+    if (!enriched) throw new Error('Erro ao atualizar pedido')
+    return enriched
+  },
+
+  async reabrirFluxoImh(
+    pedidoId: string,
+    usuarioId: string,
+    clinicaId: string,
+  ): Promise<PedidoComDetalhes> {
+    await delay(null, 300)
+
+    if (usuarioId.startsWith(DEMO_EXEMPLO_USER_PREFIX)) {
+      await ensureDemoUserById(usuarioId)
+    }
+
+    const data = loadAppData()
+    const usuario = data.usuarios.find((u) => u.id === usuarioId)
+    if (!usuario) throw new Error('Usuário não encontrado')
+
+    const pedidoIndex = data.pedidos.findIndex(
+      (p) => p.id === pedidoId && p.clinicaId === clinicaId,
+    )
+    if (pedidoIndex < 0) throw new Error('Pedido não encontrado')
+
+    const etapas = [...data.workflowEtapas].sort((a, b) => a.ordem - b.ordem)
+    const contabilidade = etapas.find((e) => e.chave === 'DIV_MAT_CONTABILIDADE_IMH')
+    if (!contabilidade) throw new Error('Workflow não configurado')
+
+    const pedido = {
+      ...data.pedidos[pedidoIndex],
+      etapasHistorico: [...data.pedidos[pedidoIndex].etapasHistorico],
+      etapasAtivasIds: [...(data.pedidos[pedidoIndex].etapasAtivasIds ?? [])],
+    }
+    const agora = new Date().toISOString()
+    const { reabriu, devolvidaEm } = reabrirPedidoAposDevolucaoOrigem(
+      data,
+      pedido,
+      contabilidade.id,
+      agora,
+    )
+    const tempoCorrecao = reabriu ? formatDuracaoEntre(devolvidaEm, agora) : null
+    const tempoTxt = formatTempoCorrecaoPrefixo(tempoCorrecao)
+
+    const hasOpenTrack = pedido.etapasHistorico.some(
+      (h) => h.etapaId === contabilidade.id && !h.dataConclusao,
+    )
+    if (!hasOpenTrack && !pedido.etapasHistorico.some((h) => h.etapaId === contabilidade.id)) {
+      pedido.etapasHistorico.push({
+        etapaId: contabilidade.id,
+        etapaNome: contabilidade.nome,
+        responsavelId: usuario.id,
+        responsavelNome: usuario.nome,
+        dataInicio: agora,
+        dataConclusao: null,
+        observacao: reabriu
+          ? `Planilha corrigida e reenviada${tempoTxt}. Aguardando recebimento pela IMH.`
+          : 'Aguardando recebimento da planilha pela IMH.',
+        arquivos: [],
+      })
+    }
+    if (!pedido.etapasAtivasIds.includes(contabilidade.id)) {
+      pedido.etapasAtivasIds.push(contabilidade.id)
+    }
+    pedido.etapaAtualId = contabilidade.id
+
+    const countRows = pedido.consumoRowIds?.length ?? 0
+    pedido.observacoes =
+      countRows > 1
+        ? reabriu
+          ? `Planilha corrigida e reenviada${tempoTxt} com ${countRows} lançamentos para IMH.`
+          : `Planilha reenviada com ${countRows} lançamentos para IMH.`
+        : reabriu
+          ? `Lançamento corrigido e reenviado${tempoTxt} para IMH.`
+          : `Lançamento reenviado diretamente para IMH.`
+
+    data.pedidos[pedidoIndex] = pedido
+    data.historico.push({
+      id: `hist-${Date.now()}`,
+      pedidoId,
+      etapaId: contabilidade.id,
+      etapaNome: contabilidade.nome,
+      usuarioId: usuario.id,
+      usuarioNome: usuario.nome,
+      data: agora,
+      observacao: reabriu
+        ? `Planilha corrigida e reenviada${tempoTxt} para IMH — ${pedido.numero}.`
+        : `Planilha reenviada para IMH — ${pedido.numero}.`,
+    })
+
+    if (reabriu) {
+      notifyPlanilhaCorrigidaReenviada(data, pedidoId, {
+        usuarioNome: usuario.nome,
+        devolvidaEm,
+        agora,
+      })
+    } else {
+      notifySetoresEtapasAtivas(data, pedidoId)
+    }
+    saveAppData(data)
+    if (useCloudAppDataSync()) {
+      await flushSupabaseAppDataSync()
+    }
+
+    const enriched = enrichPedido(pedido, getContext(data))
+    if (!enriched) throw new Error('Erro ao atualizar pedido')
+    return enriched
+  },
+
+  async executarAcao(input: ExecutarAcaoInput): Promise<PedidoComDetalhes> {
+    await delay(null, 500)
+    let data = loadAppData()
+    const usuario = data.usuarios.find((u) => u.id === input.usuarioId)
+    const pedido = data.pedidos.find(
+      (p) => p.id === input.pedidoId && p.clinicaId === input.clinicaId,
+    )
+    if (!usuario || !pedido) throw new Error('Pedido não encontrado')
+    if (
+      usuario.perfil === 'CLINICA' ||
+      usuario.perfil === 'MEDICAMENTO' ||
+      usuario.perfil === 'EMPENHADO'
+    ) {
+      throw new Error(
+        'Após o envio para a Div. de Material, a clínica possui apenas visualização da timeline.',
+      )
+    }
+
+    const etapa = data.workflowEtapas.find((e) => e.id === pedido.etapaAtualId)
+    if (!etapa) throw new Error('Etapa não encontrada')
+
+    const acao = CLINICA_ETAPA_ACOES[etapa.chave]
+    if (!acao) throw new Error('Ação não disponível nesta etapa')
+
+    if (etapa.chave === 'SOLEMP_CRIADA') {
+      if (!input.solempNumero) throw new Error('Informe o número da SOLEMP')
+      data = createSolempForPedido(data, input.pedidoId, input.solempNumero)
+    }
+    if (etapa.chave === 'SOLEMP_ASSINADA' || etapa.chave === 'NF_ANEXADA') {
+      if (!input.notaFiscalNumero?.trim()) {
+        throw new Error('Informe o número da nota fiscal')
+      }
+      data = createNotaFiscalForPedido(data, input.pedidoId, input.notaFiscalNumero.trim())
+    }
+
+    data = advancePedidoEtapa(data, input.pedidoId, usuario, acao.proximaObservacao)
+
+    if (etapa.chave === 'SOLEMP_ASSINADA') {
+      const pedidoIntermediario = data.pedidos.find((p) => p.id === input.pedidoId)!
+      const etapaIntermediaria = data.workflowEtapas.find(
+        (e) => e.id === pedidoIntermediario.etapaAtualId,
+      )
+      if (etapaIntermediaria?.chave === 'NF_ANEXADA') {
+        data = advancePedidoEtapa(
+          data,
+          input.pedidoId,
+          usuario,
+          'Nota fiscal anexada e processo enviado ao financeiro pela clínica.',
+        )
+      }
+    }
+
+    const pedidoAtualizado = data.pedidos.find((p) => p.id === input.pedidoId)!
+
+    if (etapa.chave === 'SOLEMP_CRIADA') {
+      data.notificacoes.push({
+        id: `notif-${Date.now()}`,
+        tipo: 'SOLEMP_CRIADA',
+        titulo: `SOLEMP criada — ${pedido.numero}`,
+        mensagem: `SOLEMP ${input.solempNumero} confeccionada.`,
+        pedidoId: input.pedidoId,
+        reversaoId: null,
+        perfilDestino: null,
+        etapaChave: etapa.chave,
+        lida: false,
+        data: new Date().toISOString(),
+      })
+    }
+
+    saveAppData(data)
+
+    const atualizado = pedidoAtualizado
+    const enriched = enrichPedido(atualizado, getContext(data))
+    if (!enriched) throw new Error('Erro ao atualizar pedido')
+    return enriched
+  },
+
+  async reverterEtapa(
+    pedidoId: string,
+    usuarioId: string,
+    clinicaId: string,
+    motivo: string,
+  ): Promise<PedidoComDetalhes> {
+    await delay(null, 500)
+    let data = loadAppData()
+    const usuario = data.usuarios.find((u) => u.id === usuarioId)
+    const pedido = data.pedidos.find((p) => p.id === pedidoId && p.clinicaId === clinicaId)
+    const clinica = data.clinicas.find((c) => c.id === clinicaId)
+    if (!usuario || !pedido || !clinica) throw new Error('Pedido não encontrado')
+    if (
+      usuario.perfil === 'CLINICA' ||
+      usuario.perfil === 'MEDICAMENTO' ||
+      usuario.perfil === 'EMPENHADO'
+    ) {
+      throw new Error(
+        'Após o envio para a Div. de Material, a clínica possui apenas visualização da timeline.',
+      )
+    }
+
+    data = revertPedidoEtapa(data, pedidoId, usuario, motivo, clinica.nome)
+    saveAppData(data)
+
+    const atualizado = data.pedidos.find((p) => p.id === pedidoId)!
+    const enriched = enrichPedido(atualizado, getContext(data))
+    if (!enriched) throw new Error('Erro ao reverter etapa')
+    return enriched
+  },
+
+  getAcaoDisponivel(etapaChave: string): (typeof CLINICA_ETAPA_ACOES)[string] | null {
+    return CLINICA_ETAPA_ACOES[etapaChave] ?? null
+  },
+
+  podeReverter(pedido: PedidoComDetalhes, etapas: { id: string; ordem: number }[]): boolean {
+    if (pedido.concluido) return false
+    const ordenadas = [...etapas].sort((a, b) => a.ordem - b.ordem)
+    const index = ordenadas.findIndex((e) => e.id === pedido.etapaAtualId)
+    return index > 0
+  },
+
+  getEtapaAnteriorNome(pedido: PedidoComDetalhes, etapas: { id: string; nome: string; ordem: number }[]): string {
+    const ordenadas = [...etapas].sort((a, b) => a.ordem - b.ordem)
+    const index = ordenadas.findIndex((e) => e.id === pedido.etapaAtualId)
+    return ordenadas[index - 1]?.nome ?? ''
+  },
+
+  async deleteAllByClinica(clinicaId: string): Promise<number> {
+    await delay(null, 400)
+    const data = loadAppData()
+    const pedidoIds = new Set(
+      data.pedidos.filter((p) => p.clinicaId === clinicaId).map((p) => p.id),
+    )
+    if (pedidoIds.size === 0) {
+      saveAppData(data)
+      return 0
+    }
+
+    removePedidosFromAppData(data, pedidoIds)
+    saveAppData(data)
+    return pedidoIds.size
+  },
+
+  async deletePedidosByIds(pedidoIds: string[]): Promise<number> {
+    await delay(null, 300)
+    const data = loadAppData()
+    const ids = new Set(pedidoIds)
+    if (ids.size === 0) {
+      saveAppData(data)
+      return 0
+    }
+    removePedidosFromAppData(data, ids)
+    saveAppData(data)
+    return ids.size
+  },
+}

@@ -1,0 +1,313 @@
+import { useMemo, useState } from 'react'
+import type { PedidoComDetalhes, ProcessoArquivado, WorkflowEtapa } from '@/types'
+import { formatDate } from '@/utils/format'
+import { ORDENADOR_ETAPA_ACOES } from '@/utils/portal'
+import { useOrdenadorAuth } from '@/contexts/AuthContext'
+import {
+  chavesEtapaParaPerfil,
+  chavePendenteParaPerfil,
+  pedidoPendenteParaChave,
+} from '@/utils/perfilEtapa'
+import {
+  filtrarEtapasParaTimeline,
+  usaTrilhaAuditoriaOrdenador,
+} from '@/utils/timelineFlow'
+import {
+  Timeline,
+  buildSectionedTimeline,
+  buildTimelineHeader,
+  flattenSections,
+  type TimelineNodeData,
+} from '@/components/timeline'
+import { TimelineActionButton } from '@/components/timeline/TimelineActionButton'
+import { PlanilhaFlowActions } from '@/components/timeline/PlanilhaFlowActions'
+import { DocumentoAnexoEscolherModal } from '@/components/clinica/DocumentoAnexoEscolherModal'
+import { DocumentoAnexoPreviewModal } from '@/components/clinica/DocumentoAnexoPreviewModal'
+import { PlanilhaAnexosModal } from '@/components/clinica/PlanilhaAnexosModal'
+import { pedidoAnexoService } from '@/services/pedidoAnexoService'
+import { userHasPerfil, userTemCadeiaSolemp } from '@/utils/userPerfis'
+
+interface OrdenadorInteractiveTimelineProps {
+  pedido: PedidoComDetalhes
+  etapas: WorkflowEtapa[]
+  processosArquivados?: ProcessoArquivado[]
+  onAssinar?: () => void
+  assinando?: boolean
+  onReceberPlanilha?: () => void
+  onReceberPlanilhaConfeccao?: () => void
+  onReceberPlanilhaRascunho?: () => void
+  onEncaminharImh?: () => void
+  planilhaRecebida?: boolean
+  planilhaRecebidaConfeccao?: boolean
+  planilhaRecebidaRascunho?: boolean
+  onReceberPlanilhaImh?: () => void
+  planilhaEncaminhadaImh?: boolean
+  planilhaRecebidaImh?: boolean
+  fluxoDiretoImh?: boolean
+  fluxoEncerrado?: boolean
+  mensagemFluxoEncerrado?: string | null
+}
+
+export function OrdenadorInteractiveTimeline({
+  pedido,
+  etapas,
+  processosArquivados,
+  onAssinar,
+  assinando = false,
+  onReceberPlanilha,
+  onReceberPlanilhaConfeccao,
+  onReceberPlanilhaRascunho,
+  onEncaminharImh,
+  planilhaRecebida = false,
+  planilhaRecebidaConfeccao = false,
+  planilhaRecebidaRascunho = false,
+  onReceberPlanilhaImh,
+  planilhaEncaminhadaImh = false,
+  planilhaRecebidaImh = false,
+  fluxoDiretoImh = false,
+  fluxoEncerrado = false,
+  mensagemFluxoEncerrado = null,
+}: OrdenadorInteractiveTimelineProps) {
+  const { user } = useOrdenadorAuth()
+  const [anexosModalOpen, setAnexosModalOpen] = useState(false)
+  const [escolherAnexoOpen, setEscolherAnexoOpen] = useState(false)
+  const [previewModalOpen, setPreviewModalOpen] = useState(false)
+  const [previewArquivoId, setPreviewArquivoId] = useState<string | null>(null)
+  const anexosCount = useMemo(
+    () => pedidoAnexoService.listByPedido(pedido.id).length,
+    [pedido.id],
+  )
+  const chavesPerfil = user ? chavesEtapaParaPerfil(user.perfil, user) : []
+  const chavePendente = user
+    ? chavePendenteParaPerfil(
+        pedido,
+        etapas,
+        user.perfil,
+        processosArquivados,
+        user,
+      )
+    : null
+  const trilhaAuditoria = usaTrilhaAuditoriaOrdenador(chavePendente)
+  const isCadeiaConfeccao = Boolean(user && userTemCadeiaSolemp(user))
+  const isAuditoriaUser = Boolean(user && userHasPerfil(user, 'AUDITORIA'))
+
+  const acoesPlanilhaComuns = {
+    anexosCount,
+    onAbrirAnexos: () => setAnexosModalOpen(true),
+    onVisualizarDocumento: () => setEscolherAnexoOpen(true),
+  }
+
+  // Mantém a timeline completa (todas as etapas), como antes do filtro por trilha.
+  const visiveis = useMemo(() => filtrarEtapasParaTimeline(etapas), [etapas])
+  const sections = useMemo(
+    () => buildSectionedTimeline(pedido, visiveis),
+    [pedido, visiveis],
+  )
+  const allNodes = useMemo(() => flattenSections(sections), [sections])
+  const header = useMemo(() => buildTimelineHeader(pedido, allNodes), [pedido, allNodes])
+
+  const etapaDoPerfil = useMemo(() => {
+    if (!chavePendente) return undefined
+    return visiveis.find((e) => e.chave === chavePendente)
+  }, [chavePendente, visiveis])
+
+  const acaoAtual = etapaDoPerfil ? ORDENADOR_ETAPA_ACOES[etapaDoPerfil.chave] : undefined
+  const isAuditoriaAtiva =
+    chavePendente === 'DIV_MAT_AUDITORIA' ||
+    (isAuditoriaUser &&
+      pedidoPendenteParaChave(
+        pedido,
+        visiveis,
+        'DIV_MAT_AUDITORIA',
+        processosArquivados,
+      ))
+  const isContabilidadeAtiva = etapaDoPerfil?.chave === 'DIV_MAT_CONTABILIDADE_IMH'
+  const isConfeccaoAtiva = etapaDoPerfil?.chave === 'DIV_MAT_CONFECCAO_SOLEMP'
+  const isRascunhoAtivo = etapaDoPerfil?.chave === 'DIV_MAT_FINANCAS'
+  const usaFluxoPlanilha =
+    isAuditoriaAtiva ||
+    isContabilidadeAtiva ||
+    isConfeccaoAtiva ||
+    (isCadeiaConfeccao && isRascunhoAtivo)
+
+  const renderNodeActions = (node: TimelineNodeData) => {
+    const minhaEtapa =
+      chavesPerfil.includes(node.etapa.chave) &&
+      pedidoPendenteParaChave(pedido, visiveis, node.etapa.chave)
+
+    if (!minhaEtapa || fluxoEncerrado) return null
+
+    if (!usaFluxoPlanilha && onAssinar) {
+      return (
+        <TimelineActionButton onClick={onAssinar} disabled={assinando}>
+          {assinando ? 'Processando...' : acaoAtual?.label ?? 'Concluir etapa'}
+        </TimelineActionButton>
+      )
+    }
+
+    if (
+      node.etapa.chave === 'DIV_MAT_AUDITORIA' &&
+      isAuditoriaAtiva &&
+      onReceberPlanilha &&
+      onEncaminharImh
+    ) {
+      // Sem data-keep-drawer nos botões Receber/Enviar: o drawer precisa fechar
+      // para o modal de encaminhamento (MUI Dialog) ficar visível.
+      return (
+        <PlanilhaFlowActions
+          recebida={planilhaRecebida}
+          onReceber={onReceberPlanilha}
+          onEnviar={onEncaminharImh}
+          disabled={assinando}
+          {...acoesPlanilhaComuns}
+        />
+      )
+    }
+
+    if (
+      node.etapa.chave === 'DIV_MAT_CONTABILIDADE_IMH' &&
+      chavePendente === 'DIV_MAT_CONTABILIDADE_IMH' &&
+      onReceberPlanilhaImh &&
+      onAssinar
+    ) {
+      const planilhaDisponivel = planilhaEncaminhadaImh || fluxoDiretoImh
+      return (
+        <PlanilhaFlowActions
+          recebida={planilhaRecebidaImh}
+          onReceber={onReceberPlanilhaImh}
+          onEnviar={onAssinar}
+          disabled={assinando}
+          receberDisabled={!planilhaDisponivel}
+          {...acoesPlanilhaComuns}
+        />
+      )
+    }
+
+    if (
+      node.etapa.chave === 'DIV_MAT_CONFECCAO_SOLEMP' &&
+      onReceberPlanilhaConfeccao &&
+      onAssinar
+    ) {
+      return (
+        <PlanilhaFlowActions
+          recebida={planilhaRecebidaConfeccao}
+          onReceber={onReceberPlanilhaConfeccao}
+          onEnviar={onAssinar}
+          disabled={assinando}
+          {...acoesPlanilhaComuns}
+        />
+      )
+    }
+
+    if (
+      isCadeiaConfeccao &&
+      node.etapa.chave === 'DIV_MAT_FINANCAS' &&
+      onReceberPlanilhaRascunho &&
+      onAssinar
+    ) {
+      return (
+        <PlanilhaFlowActions
+          recebida={planilhaRecebidaRascunho}
+          onReceber={onReceberPlanilhaRascunho}
+          onEnviar={onAssinar}
+          disabled={assinando}
+          {...acoesPlanilhaComuns}
+        />
+      )
+    }
+
+    // Empenhado: sem Receber/Enviar — só exibe o fluxo finalizado.
+    return null
+  }
+
+  return (
+    <>
+      <Timeline
+        pedido={pedido}
+        header={header}
+        sections={sections}
+        renderNodeActions={renderNodeActions}
+        alerts={
+          <>
+            {fluxoEncerrado && mensagemFluxoEncerrado && (
+              <div className="timeline-alert timeline-alert-success">{mensagemFluxoEncerrado}</div>
+            )}
+            {acaoAtual && etapaDoPerfil && !fluxoEncerrado && (
+              <div className="timeline-alert timeline-alert-warning">
+                <strong>Ação necessária:</strong> {acaoAtual.descricao}
+                {isAuditoriaAtiva && !planilhaRecebida && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.8rem', opacity: 0.85 }}>
+                    Enviar planilha fica bloqueado até clicar em Receber planilha.
+                  </p>
+                )}
+                {isContabilidadeAtiva && !planilhaEncaminhadaImh && !fluxoDiretoImh && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.8rem', opacity: 0.85 }}>
+                    Aguardando encaminhamento pela Auditoria.
+                  </p>
+                )}
+                {isContabilidadeAtiva &&
+                  (planilhaEncaminhadaImh || fluxoDiretoImh) &&
+                  !planilhaRecebidaImh && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.8rem', opacity: 0.85 }}>
+                    Enviar planilha fica bloqueado até clicar em Receber planilha.
+                  </p>
+                )}
+                {isConfeccaoAtiva && !planilhaRecebidaConfeccao && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.8rem', opacity: 0.85 }}>
+                    Enviar planilha fica bloqueado até clicar em Receber planilha.
+                  </p>
+                )}
+                {isRascunhoAtivo && !planilhaRecebidaRascunho && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.8rem', opacity: 0.85 }}>
+                    Enviar planilha fica bloqueado até clicar em Receber planilha.
+                  </p>
+                )}
+                {pedido.solemp && !trilhaAuditoria && (
+                  <p style={{ margin: '8px 0 0', fontSize: '0.85rem' }}>
+                    SOLEMP: <strong>{pedido.solemp.numero}</strong>
+                  </p>
+                )}
+                {!usaFluxoPlanilha && onAssinar && (
+                  <div style={{ marginTop: 12 }}>
+                    <TimelineActionButton onClick={onAssinar} disabled={assinando}>
+                      {assinando ? 'Processando...' : acaoAtual.label}
+                    </TimelineActionButton>
+                  </div>
+                )}
+              </div>
+            )}
+          </>
+        }
+        footer={
+          <span>
+            Pedido {pedido.numero} · {pedido.clinica.nome} · {formatDate(pedido.dataSolicitacao)}
+          </span>
+        }
+      />
+      <PlanilhaAnexosModal
+        open={anexosModalOpen}
+        pedidoId={pedido.id}
+        onClose={() => setAnexosModalOpen(false)}
+      />
+      <DocumentoAnexoEscolherModal
+        open={escolherAnexoOpen}
+        pedidoId={pedido.id}
+        onClose={() => setEscolherAnexoOpen(false)}
+        onEscolher={(arquivo) => {
+          setEscolherAnexoOpen(false)
+          setPreviewArquivoId(arquivo.id)
+          setPreviewModalOpen(true)
+        }}
+      />
+      <DocumentoAnexoPreviewModal
+        open={previewModalOpen}
+        pedidoId={pedido.id}
+        initialArquivoId={previewArquivoId}
+        onClose={() => {
+          setPreviewModalOpen(false)
+          setPreviewArquivoId(null)
+        }}
+      />
+    </>
+  )
+}

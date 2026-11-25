@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 480" role="img" aria-hidden="true">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a1628"/>
+      <stop offset="100%" stop-color="#1a3a62"/>
+    </linearGradient>
+  </defs>
+  <rect width="800" height="480" fill="url(#bg)"/>
+  <g transform="translate(220 80)">
+    <rect width="360" height="56" rx="6" fill="#122640" stroke="#3d7ee8" stroke-width="2"/>
+    <rect y="72" width="360" height="56" rx="6" fill="#122640" stroke="#3d7ee8" stroke-width="2"/>
+    <rect y="144" width="360" height="56" rx="6" fill="#122640" stroke="#3d7ee8" stroke-width="2"/>
+    <rect y="216" width="360" height="56" rx="6" fill="#122640" stroke="#3d7ee8" stroke-width="2"/>
+    <circle cx="24" cy="28" r="5" fill="#3dd68c"/>
+    <circle cx="24" cy="100" r="5" fill="#3dd68c"/>
+    <circle cx="24" cy="172" r="5" fill="#2f6fed"/>
+    <circle cx="24" cy="244" r="5" fill="#3dd68c"/>
+    <rect x="48" y="18" width="200" height="8" rx="2" fill="#2a4a70"/>
+    <rect x="48" y="34" width="120" height="6" rx="2" fill="#1e3555"/>
+    <rect x="48" y="90" width="200" height="8" rx="2" fill="#2a4a70"/>
+    <rect x="48" y="162" width="200" height="8" rx="2" fill="#2a4a70"/>
+    <rect x="48" y="234" width="200" height="8" rx="2" fill="#2a4a70"/>
+  </g>
+  <rect x="0" y="400" width="800" height="80" fill="#050d18" opacity="0.5"/>
+</svg>

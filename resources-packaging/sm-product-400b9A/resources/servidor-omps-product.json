@@ -1,0 +1,21 @@
+{
+  "schema": "servidor-omps-product/3",
+  "productLine": "servidor-omps",
+  "displayName": "Servidor OMPS",
+  "lanAccess": {
+    "schema": "servidor-omps-lan/2",
+    "lanHostMode": "local",
+    "requiredHttpPort": 8080,
+    "httpPortScanMaxOffset": 20,
+    "discoveryUdpPort": 47808,
+    "entryPath": "/login",
+    "allowHttpPortFallback": true
+  },
+  "clientDesktopDefaults": {
+    "schema": "omps-usuario-client-defaults/2",
+    "discoverConnection": false,
+    "lanDiscovery": false,
+    "windowTitle": "AcompOPMS",
+    "startUrlFromLanAccess": true
+  }
+}

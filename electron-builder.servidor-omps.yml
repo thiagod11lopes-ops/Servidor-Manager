@@ -1,0 +1,112 @@
+# Variante Servidor OMPS (NSIS: "Servidor OMPS.exe") — base do futuro instalador único OMPS.exe (servidor + cliente).
+# Config completa: electron-builder substitui package.json "build" ao usar --config.
+# O instalador genérico servidor.exe NÃO usa este arquivo (package:installer → package.json apenas).
+appId: com.servidor.omps
+productName: Servidor OMPS
+copyright: Copyright © Servidor Manager / OMPS
+
+directories:
+  output: release/servidor-omps
+  buildResources: desktop
+
+extraMetadata:
+  description: Servidor OMPS — Servidor Manager com payload AcompOPMS para instalação local
+
+files:
+  - dist/**/*
+  - desktop/main.cjs
+  - desktop/preload.cjs
+  - package.json
+
+extraResources:
+  - from: dist-local-service
+    to: local-service
+    filter:
+      - "**/*"
+  - from: dist
+    to: ui-dist
+    filter:
+      - "**/*"
+  - from: scripts/serve-manager-ui.mjs
+    to: manager-launcher/serve-manager-ui.mjs
+  - from: scripts/validate-manager-ui-bundle.mjs
+    to: manager-launcher/validate-manager-ui-bundle.mjs
+  - from: scripts/Resolve-ManagerInstallRoot.ps1
+    to: manager-launcher/Resolve-ManagerInstallRoot.ps1
+  - from: scripts/Launch-ServidorManager-Hidden.vbs
+    to: manager-launcher/Launch-ServidorManager-Hidden.vbs
+  - from: scripts/Launch-ServidorManager.cmd
+    to: manager-launcher/Launch-ServidorManager.cmd
+  - from: scripts/manager-localhost-only-guard.mjs
+    to: manager-launcher/manager-localhost-only-guard.mjs
+  - from: scripts/Start-ServidorManager-NoElectron.ps1
+    to: manager-launcher/Start-ServidorManager-NoElectron.ps1
+  - from: scripts/Resolve-ManagerNodeRuntime.ps1
+    to: manager-launcher/Resolve-ManagerNodeRuntime.ps1
+  - from: scripts/ManagerLauncherSession.ps1
+    to: manager-launcher/ManagerLauncherSession.ps1
+  - from: scripts/ManagerLauncherProfile.ps1
+    to: manager-launcher/ManagerLauncherProfile.ps1
+  - from: scripts/Stop-ServidorManager-Installed.ps1
+    to: manager-launcher/Stop-ServidorManager-Installed.ps1
+  - from: scripts/Invoke-ServerBootstrap.ps1
+    to: server-bootstrap/Invoke-ServerBootstrap.ps1
+  - from: scripts/PostInstall-ManagerShortcuts.ps1
+    to: server-bootstrap/PostInstall-ManagerShortcuts.ps1
+  - from: scripts/PostInstall-ServidorOmpsShortcuts.ps1
+    to: server-bootstrap/PostInstall-ServidorOmpsShortcuts.ps1
+  - from: scripts/Resolve-ManagerInstallRoot.ps1
+    to: server-bootstrap/Resolve-ManagerInstallRoot.ps1
+  - from: resources-packaging/servidor-omps-product.json
+    to: servidor-omps-product.json
+  - from: scripts/Create-DesktopShortcut-Manager.ps1
+    to: server-bootstrap/Create-DesktopShortcut-Manager.ps1
+  - from: scripts/Resolve-OmpsUserDesktopDirectory.ps1
+    to: server-bootstrap/Resolve-OmpsUserDesktopDirectory.ps1
+  - from: scripts/Remove-ServidorOmpsShortcuts.ps1
+    to: server-bootstrap/Remove-ServidorOmpsShortcuts.ps1
+  - from: scripts/Start-ServidorManager-NoElectron.ps1
+    to: server-bootstrap/Start-ServidorManager-NoElectron.ps1
+  - from: scripts/Resolve-ManagerNodeRuntime.ps1
+    to: server-bootstrap/Resolve-ManagerNodeRuntime.ps1
+  - from: scripts/ManagerLauncherSession.ps1
+    to: server-bootstrap/ManagerLauncherSession.ps1
+  - from: scripts/Stop-ServidorManager-Installed.ps1
+    to: server-bootstrap/Stop-ServidorManager-Installed.ps1
+  - from: vendor/bundled-node/win-x64
+    to: nodejs
+    filter:
+      - node.exe
+      - LICENSE
+      - manifest.json
+  - from: release/omps-payload
+    to: omps-payload
+    filter:
+      - "**/*"
+  - from: release/omps-bundle
+    to: omps-bundle
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  executableName: ServidorManager
+  signAndEditExecutable: false
+
+portable:
+  artifactName: Servidor OMPS-portable.${ext}
+
+nsis:
+  artifactName: Servidor OMPS.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # Desktop OMPS: PostInstall (Servidor OMPS.lnk → launcher navegador). Evita duplicata NSIS → .exe e nomes genéricos.
+  createDesktopShortcut: false
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  include: desktop/installer-servidor-omps.nsh
+  uninstallDisplayName: Servidor OMPS
+  shortcutName: Servidor OMPS

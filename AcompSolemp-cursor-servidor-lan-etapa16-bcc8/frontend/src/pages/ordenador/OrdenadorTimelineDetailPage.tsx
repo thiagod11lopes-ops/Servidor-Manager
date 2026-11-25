@@ -1,0 +1,559 @@
+import { useEffect, useMemo, useState } from 'react'
+import { useParams, useSearchParams } from 'react-router-dom'
+import { usePortalPaths } from '@/contexts/DemoRouteContext'
+import { Box, Button, Paper, Typography, Chip } from '@mui/material'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
+import { PageHeader } from '@/components/common/PageHeader'
+import { LoadingSpinner } from '@/components/common/LoadingSpinner'
+import { OrdenadorInteractiveTimeline } from '@/components/workflow/OrdenadorInteractiveTimeline'
+import { SetorConclusaoModal } from '@/components/ordenador/SetorConclusaoModal'
+import { useAssinarSolemp, useDevolverPlanilha, useOrdenadorPedido } from '@/hooks/useOrdenadorPedidos'
+import { useProcessosArquivadosSetor } from '@/hooks/useProcessosArquivados'
+import { AuditoriaPlanilhaModal } from '@/components/ordenador/AuditoriaPlanilhaModal'
+import { DevolverPlanilhaModal } from '@/components/ordenador/DevolverPlanilhaModal'
+import { ContabilidadeConfirmacaoModal } from '@/components/ordenador/ContabilidadeConfirmacaoModal'
+import { ConfeccaoSolempModal } from '@/components/ordenador/ConfeccaoSolempModal'
+import { EmpenhoEnvioModal } from '@/components/ordenador/EmpenhoEnvioModal'
+import { MENSAGENS_ARQUIVAMENTO } from '@/utils/processoArquivamento'
+import { useWorkflowEtapas } from '@/hooks/useCadastros'
+import { useOrdenadorAuth } from '@/contexts/AuthContext'
+import { formatCurrency, formatDate } from '@/utils/format'
+import { getRoleLabel, loadAppData } from '@/mocks/seed'
+import {
+  chavePendenteParaPerfil,
+  chavesEtapaParaPerfil,
+  pedidoPendenteParaChave,
+  PERFIL_PARA_CHAVE_ETAPA,
+} from '@/utils/perfilEtapa'
+import { getSolempDefaults, parseSolempNumero } from '@/utils/solemp'
+import { pedidoPlanilhaEnvioService } from '@/services/pedidoPlanilhaEnvioService'
+import { useCloudAppDataSync } from '@/config/dataSource'
+import { flushSupabaseAppDataSync } from '@/data/persistence/supabaseSync'
+import { pedidoToConsumoRow } from '@/utils/consumoMaterialTemplate'
+import { buildImhPlanilhaFromConsumo } from '@/utils/imhPlanilhaTemplate'
+import { listarDestinosDevolucaoPlanilha, type DestinoDevolucaoPlanilha } from '@/utils/devolverPlanilha'
+import type { PedidoPlanilhaEnvioState } from '@/types'
+import { userHasPerfil } from '@/utils/userPerfis'
+
+export default function OrdenadorTimelineDetailPage() {
+  const { id = '' } = useParams()
+  const [searchParams] = useSearchParams()
+  const { navigatePortal } = usePortalPaths()
+  const { user } = useOrdenadorAuth()
+  const { data: pedido, isLoading } = useOrdenadorPedido(id)
+  const { data: etapas = [] } = useWorkflowEtapas()
+  const assinar = useAssinarSolemp()
+  const devolverPlanilha = useDevolverPlanilha()
+  const [auditoriaOpen, setAuditoriaOpen] = useState(false)
+  const [planilhaOpen, setPlanilhaOpen] = useState(false)
+  const [devolverOpen, setDevolverOpen] = useState(false)
+  const [planilhaRecebida, setPlanilhaRecebida] = useState(false)
+  const [planilhaRecebidaConfeccao, setPlanilhaRecebidaConfeccao] = useState(false)
+  const [planilhaRecebidaRascunho, setPlanilhaRecebidaRascunho] = useState(false)
+  const [planilhaEncaminhadaImh, setPlanilhaEncaminhadaImh] = useState(false)
+  const [planilhaRecebidaImh, setPlanilhaRecebidaImh] = useState(false)
+  const [contabilidadeOpen, setContabilidadeOpen] = useState(false)
+  const [confeccaoOpen, setConfeccaoOpen] = useState(false)
+  const [empenhoOpen, setEmpenhoOpen] = useState(false)
+  const [fluxoEncerrado, setFluxoEncerrado] = useState(false)
+  const [mensagemFluxoEncerrado, setMensagemFluxoEncerrado] = useState<string | null>(null)
+  const perfilLabel = user ? getRoleLabel(user.perfil) : 'Setor'
+  const isConfeccao = Boolean(user && userHasPerfil(user, 'CONFECCAO_SOLEMP'))
+  const chavesArquivo = user ? chavesEtapaParaPerfil(user.perfil, user) : []
+  const { data: processosArquivados = [] } = useProcessosArquivadosSetor(chavesArquivo)
+  const chavePendente = useMemo(() => {
+    if (!user || !pedido) return null
+    return chavePendenteParaPerfil(
+      pedido,
+      etapas,
+      user.perfil,
+      processosArquivados,
+      user,
+    )
+  }, [user, pedido, etapas, processosArquivados])
+  const chavePerfil = chavePendente ?? (user ? PERFIL_PARA_CHAVE_ETAPA[user.perfil] : null)
+  const etapaPerfil = etapas.find((e) => e.chave === chavePerfil)
+  const isAuditoria = Boolean(
+    chavePendente === 'DIV_MAT_AUDITORIA' ||
+      (user &&
+        userHasPerfil(user, 'AUDITORIA') &&
+        pedido &&
+        pedidoPendenteParaChave(
+          pedido,
+          etapas,
+          'DIV_MAT_AUDITORIA',
+          processosArquivados,
+        )),
+  )
+  const isContabilidade = chavePendente === 'DIV_MAT_CONTABILIDADE_IMH'
+  const isConfeccaoEtapa = chavePendente === 'DIV_MAT_CONFECCAO_SOLEMP'
+  const isRascunhoEtapa = chavePendente === 'DIV_MAT_FINANCAS'
+  const isEmpenhadoEtapa = chavePendente === 'DIV_MAT_EMPENHADO'
+
+  const solempDefaults = useMemo(() => {
+    if (!pedido) {
+      return { prefix: '65720', sequencial: '', ano: String(new Date().getFullYear()) }
+    }
+    if (pedido.solemp?.numero) {
+      const parsed = parseSolempNumero(pedido.solemp.numero)
+      if (parsed) return parsed
+    }
+    return getSolempDefaults(loadAppData(), pedido.clinicaId)
+  }, [pedido])
+
+  const planilhaEnvio = useMemo<PedidoPlanilhaEnvioState | null>(() => {
+    if (!pedido) return null
+    const stored = pedidoPlanilhaEnvioService.getForPedido(pedido.id)
+    if (stored) return stored
+    // Sem snapshot: não recriar Controle a partir do consumo — a Div. Material
+    // precisa vir do envio da clínica.
+    if (isConfeccao) return null
+    const row = pedidoToConsumoRow(pedido)
+    const built = buildImhPlanilhaFromConsumo([row])
+    return {
+      formato: 'imh',
+      cabecalho: built.cabecalho,
+      linhas: built.linhas,
+      enviadoEm: pedido.dataSolicitacao,
+    }
+  }, [pedido, isConfeccao])
+
+  const preferFormatoPlanilha = useMemo(() => {
+    // Auditoria / Contabilidade: IMH exatamente como enviada pela clínica.
+    if (isAuditoria || isContabilidade) {
+      if (
+        planilhaEnvio?.imhAbaLinhas?.length ||
+        planilhaEnvio?.imhMedicamentoLinhas?.length ||
+        planilhaEnvio?.linhas?.length
+      ) {
+        return 'imh' as const
+      }
+    }
+    // Confecção e seguintes: Div. Material exatamente como enviada pela clínica.
+    if (planilhaEnvio?.divMaterialLinhas?.length) return 'divMaterial' as const
+    if (isConfeccao || isConfeccaoEtapa || isRascunhoEtapa || isEmpenhadoEtapa) {
+      return 'controleSolemp' as const
+    }
+    return 'imh' as const
+  }, [
+    isAuditoria,
+    isContabilidade,
+    isConfeccao,
+    isConfeccaoEtapa,
+    isRascunhoEtapa,
+    isEmpenhadoEtapa,
+    planilhaEnvio,
+  ])
+
+  const fluxoDiretoImh = useMemo(() => {
+    if (!pedido) return false
+    const auditoriaEtapa = etapas.find((e) => e.chave === 'DIV_MAT_AUDITORIA')
+    const contabilidadeEtapa = etapas.find((e) => e.chave === 'DIV_MAT_CONTABILIDADE_IMH')
+    const temHistoricoAuditoria = auditoriaEtapa
+      ? pedido.etapasHistorico.some((h) => h.etapaId === auditoriaEtapa.id)
+      : false
+    const temHistoricoContabilidade = contabilidadeEtapa
+      ? pedido.etapasHistorico.some((h) => h.etapaId === contabilidadeEtapa.id)
+      : false
+    return temHistoricoContabilidade && !temHistoricoAuditoria
+  }, [pedido, etapas])
+
+  useEffect(() => {
+    if (!pedido) return
+    const stored = pedidoPlanilhaEnvioService.getForPedido(pedido.id)
+    const auditoriaEtapa = etapas.find((e) => e.chave === 'DIV_MAT_AUDITORIA')
+    const auditoriaConcluida = auditoriaEtapa
+      ? Boolean(
+          pedido.etapasHistorico.find(
+            (h) => h.etapaId === auditoriaEtapa.id && h.dataConclusao,
+          ),
+        )
+      : false
+    const contabilidadeEtapa = etapas.find((e) => e.chave === 'DIV_MAT_CONTABILIDADE_IMH')
+    const contabilidadeAberta = contabilidadeEtapa
+      ? pedido.etapasHistorico.some(
+          (h) => h.etapaId === contabilidadeEtapa.id && !h.dataConclusao,
+        )
+      : false
+
+    // Não derruba o "recebido" da sessão se um sync remoto atrasado ainda não trouxe a flag.
+    setPlanilhaRecebida((prev) => prev || Boolean(stored?.recebidaEm))
+    setPlanilhaRecebidaConfeccao((prev) => prev || Boolean(stored?.recebidaConfeccaoEm))
+    setPlanilhaRecebidaRascunho((prev) => prev || Boolean(stored?.recebidaRascunhoEm))
+    setPlanilhaEncaminhadaImh((prev) =>
+      Boolean(
+        prev ||
+          stored?.encaminhadaImhEm ||
+          (auditoriaConcluida && Boolean(stored)) ||
+          (fluxoDiretoImh && (Boolean(stored?.enviadoEm) || contabilidadeAberta)),
+      ),
+    )
+    setPlanilhaRecebidaImh((prev) => prev || Boolean(stored?.recebidaImhEm))
+    // arquivadaEm é só da IMH — não deve bloquear Confecção em fluxo paralelo
+    const encerradoContabilidade =
+      Boolean(stored?.arquivadaEm) && chavePendente === 'DIV_MAT_CONTABILIDADE_IMH'
+    setFluxoEncerrado(encerradoContabilidade)
+    if (encerradoContabilidade) {
+      setMensagemFluxoEncerrado(MENSAGENS_ARQUIVAMENTO.DIV_MAT_CONTABILIDADE_IMH)
+    } else {
+      setMensagemFluxoEncerrado(null)
+    }
+  }, [pedido, etapas, chavePendente, fluxoDiretoImh])
+
+  useEffect(() => {
+    if (!pedido || searchParams.get('planilha') !== '1') return
+    setPlanilhaOpen(true)
+  }, [pedido, searchParams])
+
+  const destinosDevolucao = useMemo(() => {
+    if (!pedido || !chavePerfil) return []
+    return listarDestinosDevolucaoPlanilha(pedido, etapas, planilhaEnvio, chavePerfil)
+  }, [pedido, etapas, planilhaEnvio, chavePerfil])
+
+  if (isLoading) return <LoadingSpinner />
+
+  if (!pedido) {
+    return (
+      <Box>
+        <Typography>Processo não encontrado ou sem pendência para o seu perfil.</Typography>
+        <Button onClick={() => navigatePortal('/ordenador/timelines')} sx={{ mt: 2 }}>
+          Voltar
+        </Button>
+      </Box>
+    )
+  }
+
+  const concluirComSucesso = () => {
+    setAuditoriaOpen(false)
+    setContabilidadeOpen(false)
+    setConfeccaoOpen(false)
+    setEmpenhoOpen(false)
+    navigatePortal('/ordenador/arquivados')
+  }
+
+  const handleAssinar = () => {
+    if (isAuditoria) return
+    if (isContabilidade) {
+      if (!planilhaRecebidaImh) return
+      setContabilidadeOpen(true)
+      return
+    }
+    if (isConfeccaoEtapa) {
+      if (!planilhaRecebidaConfeccao) return
+      setConfeccaoOpen(true)
+      return
+    }
+    if (isConfeccao && isRascunhoEtapa) {
+      if (!planilhaRecebidaRascunho) return
+      setEmpenhoOpen(true)
+      return
+    }
+    // Empenhado não envia planilha — fica concluído ao enviar em Aguardando NE.
+    if (isEmpenhadoEtapa) return
+    assinar.mutate({ pedidoId: pedido.id }, { onSuccess: concluirComSucesso })
+  }
+
+  const handleEnviarEmpenho = ({
+    empenhoNumero,
+    observacoes,
+  }: {
+    empenhoNumero: string
+    observacoes: string
+  }) => {
+    assinar.mutate(
+      { pedidoId: pedido.id, empenhoNumero, observacoes },
+      {
+        onSuccess: concluirComSucesso,
+        onError: (error) => {
+          window.alert(
+            error instanceof Error
+              ? error.message
+              : 'Não foi possível enviar a planilha. Tente novamente.',
+          )
+        },
+      },
+    )
+  }
+
+  const persistRecebimento = async () => {
+    if (useCloudAppDataSync()) {
+      await flushSupabaseAppDataSync()
+    }
+  }
+
+  const handleEnviarAuditoria = (anotacoes: string) => {
+    if (
+      !planilhaRecebida ||
+      !pedidoPlanilhaEnvioService.foiRecebidaNoSetor(pedido.id, 'DIV_MAT_AUDITORIA')
+    ) {
+      window.alert('Receba a planilha antes de enviar. Clique em Receber Planilha primeiro.')
+      return
+    }
+    assinar.mutate(
+      { pedidoId: pedido.id, anotacoes },
+      {
+        onSuccess: () => {
+          pedidoPlanilhaEnvioService.markEncaminhadaImh(pedido.id)
+          setAuditoriaOpen(false)
+          navigatePortal('/ordenador/arquivados')
+        },
+        onError: (error) => {
+          window.alert(
+            error instanceof Error
+              ? error.message
+              : 'Não foi possível enviar a planilha. Tente novamente.',
+          )
+        },
+      },
+    )
+  }
+
+  const handleReceberPlanilhaImh = () => {
+    pedidoPlanilhaEnvioService.markRecebidaImh(pedido.id)
+    setPlanilhaRecebidaImh(true)
+    setPlanilhaOpen(true)
+    void persistRecebimento()
+  }
+
+  const handleReceberPlanilha = () => {
+    pedidoPlanilhaEnvioService.markRecebida(pedido.id)
+    setPlanilhaRecebida(true)
+    setPlanilhaOpen(true)
+    void persistRecebimento()
+  }
+
+  const handleReceberPlanilhaConfeccao = () => {
+    pedidoPlanilhaEnvioService.markRecebidaConfeccao(pedido.id)
+    setPlanilhaRecebidaConfeccao(true)
+    setPlanilhaOpen(true)
+    void persistRecebimento()
+  }
+
+  const handleReceberPlanilhaRascunho = () => {
+    pedidoPlanilhaEnvioService.markRecebidaRascunho(pedido.id)
+    setPlanilhaRecebidaRascunho(true)
+    setPlanilhaOpen(true)
+    void persistRecebimento()
+  }
+
+  const handleAbrirDevolver = () => {
+    setDevolverOpen(true)
+  }
+
+  const handleConfirmarDevolver = (
+    destino: DestinoDevolucaoPlanilha,
+    justificativa: string,
+  ) => {
+    devolverPlanilha.mutate(
+      { pedidoId: pedido.id, destino, justificativa },
+      {
+        onSuccess: () => {
+          setDevolverOpen(false)
+          setPlanilhaOpen(false)
+          navigatePortal('/ordenador/timelines')
+        },
+      },
+    )
+  }
+
+  const handleEncaminharImh = () => {
+    if (
+      !planilhaRecebida ||
+      !pedidoPlanilhaEnvioService.foiRecebidaNoSetor(pedido.id, 'DIV_MAT_AUDITORIA')
+    ) {
+      return
+    }
+    setAuditoriaOpen(true)
+  }
+
+  const handleConfirmarContabilidade = (anotacoes: string) => {
+    assinar.mutate(
+      { pedidoId: pedido.id, anotacoes },
+      {
+        onSuccess: () => {
+          setContabilidadeOpen(false)
+          navigatePortal('/ordenador/arquivados')
+        },
+      },
+    )
+  }
+
+  const handleEnviarConfeccao = ({
+    numero,
+    valor,
+    comentario,
+  }: {
+    numero: string
+    valor: number
+    comentario?: string
+  }) => {
+    assinar.mutate(
+      {
+        pedidoId: pedido.id,
+        solempNumero: numero,
+        solempValor: valor,
+        anotacoes: comentario,
+      },
+      { onSuccess: concluirComSucesso },
+    )
+  }
+
+  const modalAberto =
+    auditoriaOpen || planilhaOpen || contabilidadeOpen || confeccaoOpen || empenhoOpen
+
+  const planilhaTitle = (() => {
+    if (isContabilidade) return `IMH — Planilha ${pedido.numero}`
+    if (isConfeccaoEtapa) return `Confecção de Solemp — Div. de Material ${pedido.numero}`
+    if (isRascunhoEtapa) return `Aguardando NE — Div. de Material ${pedido.numero}`
+    if (isEmpenhadoEtapa) return `Empenhado — Div. de Material ${pedido.numero}`
+    if (isConfeccao) return `Cadeia Solemp — Div. de Material ${pedido.numero}`
+    return undefined
+  })()
+
+  return (
+    <>
+      <Button
+        startIcon={<ArrowBackIcon />}
+        onClick={() => navigatePortal('/ordenador/timelines')}
+        sx={{ mb: 1.5 }}
+      >
+        Voltar às timelines
+      </Button>
+
+      <PageHeader
+        title={`${perfilLabel} — ${pedido.numero}`}
+        titleVariant="h6"
+        subtitle={`${pedido.clinica.nome} · ${pedido.empresa.nomeFantasia}`}
+      />
+
+      <Paper
+        elevation={0}
+        sx={{
+          mb: 2,
+          px: 2,
+          py: 1.5,
+          borderRadius: 3,
+          border: 1,
+          borderColor: 'divider',
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 1.5,
+          alignItems: 'center',
+          bgcolor: 'background.paper',
+        }}
+      >
+        <Chip
+          label={etapaPerfil?.nome ?? pedido.etapaAtual.nome}
+          color="warning"
+          size="small"
+          sx={{ fontWeight: 700 }}
+        />
+        <Typography variant="body2" color="text.secondary">
+          {pedido.material.descricao}
+        </Typography>
+        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+          {formatCurrency(pedido.valor)}
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Solicitado em {formatDate(pedido.dataSolicitacao)}
+        </Typography>
+        {pedido.solemp && (
+          <Chip
+            label={`SOLEMP ${pedido.solemp.numero}${
+              pedido.solemp.valor != null ? ` · ${formatCurrency(pedido.solemp.valor)}` : ''
+            }`}
+            color="primary"
+            variant="outlined"
+            size="small"
+            sx={{ fontWeight: 700, ml: { xs: 0, sm: 'auto' } }}
+          />
+        )}
+      </Paper>
+
+      <OrdenadorInteractiveTimeline
+        pedido={pedido}
+        etapas={etapas}
+        processosArquivados={processosArquivados}
+        onAssinar={handleAssinar}
+        assinando={assinar.isPending && !modalAberto}
+        onReceberPlanilha={isAuditoria ? handleReceberPlanilha : undefined}
+        onReceberPlanilhaConfeccao={isConfeccao ? handleReceberPlanilhaConfeccao : undefined}
+        onReceberPlanilhaRascunho={isConfeccao ? handleReceberPlanilhaRascunho : undefined}
+        onEncaminharImh={isAuditoria ? handleEncaminharImh : undefined}
+        planilhaRecebida={planilhaRecebida}
+        planilhaRecebidaConfeccao={planilhaRecebidaConfeccao}
+        planilhaRecebidaRascunho={planilhaRecebidaRascunho}
+        onReceberPlanilhaImh={isContabilidade ? handleReceberPlanilhaImh : undefined}
+        planilhaEncaminhadaImh={planilhaEncaminhadaImh}
+        planilhaRecebidaImh={planilhaRecebidaImh}
+        fluxoDiretoImh={fluxoDiretoImh}
+        fluxoEncerrado={fluxoEncerrado}
+        mensagemFluxoEncerrado={mensagemFluxoEncerrado}
+      />
+      {fluxoEncerrado && (
+        <Button
+          variant="contained"
+          color="primary"
+          sx={{ mt: 2 }}
+          onClick={() => navigatePortal('/ordenador/arquivados')}
+        >
+          Ver arquivados
+        </Button>
+      )}
+
+      <AuditoriaPlanilhaModal
+        open={planilhaOpen}
+        pedidoNumero={pedido.numero}
+        planilha={planilhaEnvio}
+        preferFormato={preferFormatoPlanilha}
+        title={planilhaTitle}
+        onClose={() => setPlanilhaOpen(false)}
+        onDevolver={handleAbrirDevolver}
+      />
+
+      <DevolverPlanilhaModal
+        open={devolverOpen}
+        destinos={destinosDevolucao}
+        loading={devolverPlanilha.isPending}
+        onClose={() => setDevolverOpen(false)}
+        onConfirmar={handleConfirmarDevolver}
+      />
+
+      <SetorConclusaoModal
+        open={auditoriaOpen}
+        variante="auditoria"
+        onClose={() => setAuditoriaOpen(false)}
+        onEnviar={handleEnviarAuditoria}
+        loading={assinar.isPending}
+        pedidoNumero={pedido.numero}
+      />
+
+      <ContabilidadeConfirmacaoModal
+        open={contabilidadeOpen}
+        onClose={() => setContabilidadeOpen(false)}
+        onConfirmar={handleConfirmarContabilidade}
+        loading={assinar.isPending}
+        pedido={pedido}
+      />
+
+      <ConfeccaoSolempModal
+        open={confeccaoOpen}
+        onClose={() => setConfeccaoOpen(false)}
+        onEnviar={handleEnviarConfeccao}
+        loading={assinar.isPending}
+        pedidoNumero={pedido.numero}
+        defaults={solempDefaults}
+        valorSugerido={pedido.valor}
+      />
+
+      <EmpenhoEnvioModal
+        open={empenhoOpen}
+        onClose={() => setEmpenhoOpen(false)}
+        onEnviar={handleEnviarEmpenho}
+        loading={assinar.isPending}
+        pedidoNumero={pedido.numero}
+        solempNumero={pedido.solemp?.numero}
+      />
+    </>
+  )
+}

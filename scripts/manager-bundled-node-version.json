@@ -1,0 +1,7 @@
+{
+  "version": "22.16.0",
+  "minSystemNodeMajor": 20,
+  "distBaseUrl": "https://nodejs.org/dist",
+  "platform": "win-x64",
+  "artifactNameTemplate": "node-v{version}-win-x64.zip"
+}

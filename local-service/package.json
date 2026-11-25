@@ -1,0 +1,10 @@
+{
+  "name": "servidor-manager-local-service",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --experimental-strip-types --watch --watch-path=./src src/index.ts",
+    "start": "node --experimental-strip-types src/index.ts"
+  }
+}

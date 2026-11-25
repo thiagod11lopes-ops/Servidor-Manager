@@ -1,0 +1,18 @@
+{
+  "schema": "servidor-omps-product/2",
+  "productLine": "servidor-omps",
+  "displayName": "Servidor OMPS",
+  "fixedLanAccess": {
+    "schema": "servidor-omps-fixed-lan/1",
+    "expectedLanHost": "192.168.1.100",
+    "requiredHttpPort": 8080,
+    "entryPath": "/login",
+    "allowHttpPortFallback": false
+  },
+  "clientDesktopDefaults": {
+    "schema": "omps-usuario-client-defaults/1",
+    "discoverConnection": true,
+    "windowTitle": "AcompOPMS",
+    "startUrlFromFixedLanAccess": true
+  }
+}

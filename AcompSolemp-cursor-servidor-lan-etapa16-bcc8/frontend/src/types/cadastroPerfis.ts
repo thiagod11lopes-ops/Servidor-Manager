@@ -1,0 +1,97 @@
+import type { UserRole } from '@/types'
+
+export interface CadastroPerfilOpcao {
+  id: string
+  label: string
+  perfil: UserRole
+  graduacao: string
+  /** Clínica / Medicamento usam nome da entidade; demais usam nome do usuário */
+  campoNomeLabel: string
+  campoNomePlaceholder: string
+  descricao: string
+  isClinica?: boolean
+  isMedicamento?: boolean
+  /** Entidade Empenhado (portal clínica, empenho no formato NE) */
+  isEmpenhado?: boolean
+}
+
+export function isCadastroEntidadeClinica(opcao: CadastroPerfilOpcao): boolean {
+  return Boolean(opcao.isClinica || opcao.isMedicamento || opcao.isEmpenhado)
+}
+
+/** Tipos de setor que podem ser combinados no mesmo usuário. */
+export function isCadastroSetorCombinavel(opcao: CadastroPerfilOpcao): boolean {
+  return !isCadastroEntidadeClinica(opcao)
+}
+
+export type ClinicaEntidadeTipo = 'clinica' | 'medicamento' | 'empenhado'
+
+export function resolveClinicaEntidadeTipo(opcao: CadastroPerfilOpcao): ClinicaEntidadeTipo {
+  if (opcao.isMedicamento) return 'medicamento'
+  if (opcao.isEmpenhado) return 'empenhado'
+  return 'clinica'
+}
+
+/** Opções de cadastro da aba Cadastros (nome + e-mail @marinha.mil.br) */
+export const CADASTRO_PERFIS: CadastroPerfilOpcao[] = [
+  {
+    id: 'clinica',
+    label: 'Clínica',
+    perfil: 'CLINICA',
+    graduacao: 'Clínica',
+    campoNomeLabel: 'Nome do Responsável da Clínica',
+    campoNomePlaceholder: 'Ex.: Cap. Ana Paula',
+    descricao: 'Acesso ao portal da clínica para lançamentos e visualização da timeline.',
+    isClinica: true,
+  },
+  {
+    id: 'medicamento',
+    label: 'Medicamento',
+    perfil: 'MEDICAMENTO',
+    graduacao: 'Medicamento',
+    campoNomeLabel: 'Nome do Responsável do Medicamento',
+    campoNomePlaceholder: 'Ex.: Ten. Roberto Lima',
+    descricao:
+      'Mesmo portal da clínica para lançamentos; a planilha é enviada diretamente para IMH, sem passar pela Auditoria.',
+    isMedicamento: true,
+  },
+  {
+    id: 'auditoria',
+    label: 'Auditoria',
+    perfil: 'AUDITORIA',
+    graduacao: 'Auditoria',
+    campoNomeLabel: 'Nome do Responsável da Auditoria',
+    campoNomePlaceholder: 'Ex.: Cap. Ana Paula',
+    descricao: 'Responsável pela etapa Auditoria na Div. de Material.',
+  },
+  {
+    id: 'contabilidade',
+    label: 'IMH',
+    perfil: 'CONTABILIDADE_IMH',
+    graduacao: 'IMH',
+    campoNomeLabel: 'Nome do Responsável da IMH',
+    campoNomePlaceholder: 'Ex.: Ten. Roberto Lima',
+    descricao: 'Responsável pela etapa IMH na Div. de Material.',
+  },
+  {
+    id: 'confeccao',
+    label: 'Confecção de Solemp',
+    perfil: 'CONFECCAO_SOLEMP',
+    graduacao: 'Confecção de Solemp',
+    campoNomeLabel: 'Nome do Responsável da Confecção de Solemp',
+    campoNomePlaceholder: 'Ex.: Sgt. Maria Souza',
+    descricao:
+      'Responsável pela etapa Confecção de Solemp. Para também operar Aguardando NE, marque os dois tipos no cadastro.',
+  },
+  {
+    id: 'financas',
+    label: 'Aguardando NE',
+    perfil: 'FINANCEIRO',
+    graduacao: 'Aguardando NE',
+    campoNomeLabel: 'Nome do Responsável de Aguardando NE',
+    campoNomePlaceholder: 'Ex.: Ten. Santos',
+    descricao:
+      'Responsável pela etapa Aguardando NE. Pode ser combinado com Confecção de Solemp no mesmo usuário.',
+  },
+  // Empenhado não é tipo de cadastro: é só a etapa final automática da cadeia Solemp.
+]
